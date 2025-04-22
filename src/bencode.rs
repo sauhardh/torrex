@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 #[derive(Clone)]
 pub struct Bencode {}
 
@@ -50,10 +52,8 @@ impl Bencode {
             //For List
             //
             // value for list is encoded as `l<bencoded_elements>e`. For example: l5:helloi69ee
-            //
             // Note: list may contain any bencoded type including integers, strings, dictionaries, and even lists.
-            // `l4:spam4:eggse` represents ["spam","eggs" ]
-            // `le` represents empty list []
+            // `l4:spam4:eggse` represents ["spam","eggs" ]. `le` represents empty list []
             Some('l') => {
                 let mut rest = encoded_value.split_at(1).1;
                 let mut list = Vec::new();
@@ -65,6 +65,36 @@ impl Bencode {
                 }
 
                 (list.into(), &rest[1..])
+            }
+
+            // For dictionary
+            //
+            // value for dictionary is encoded as `d<key1><value1>..<keyN><ValueN>e`. For example: d3:foo3:bar5:helloi52ee
+            // key must be  string while value can be any type.
+            Some('d') => {
+                let mut rest = encoded_value.split_at(1).1;
+                let mut hash: HashMap<String, serde_json::Value> = HashMap::new();
+
+                let (mut if_key, mut key) = (false, None);
+
+                while rest.len() > 2 {
+                    let (value, r) = self.clone().decoder(rest);
+
+                    if if_key {
+                        hash.insert(key.clone().unwrap(), value);
+                        if_key = false;
+                    } else {
+                        if let serde_json::Value::String(s) = &value {
+                            key = Some(s.clone());
+                            if_key = true;
+                        }
+                    }
+
+                    rest = r;
+                }
+
+                let value = serde_json::Value::Object(hash.into_iter().collect());
+                (value, &rest[1..])
             }
 
             // if not matched
@@ -80,7 +110,6 @@ impl Bencode {
 
 #[cfg(test)]
 mod bencode_tester {
-
     use super::*;
 
     #[test]
@@ -106,5 +135,13 @@ mod bencode_tester {
         let output = ben.decoder(encoded_list);
         let output_value = serde_json::to_string(&output.0).unwrap();
         assert_eq!("[[4],5]", output_value)
+    }
+
+    #[test]
+    fn test_decode_dict() {
+        let ben = Bencode::new();
+        let encoded_dict = "d3:foo9:raspberry5:helloi52ee";
+        let output = ben.decoder(encoded_dict);
+        println!("{}", output.0);
     }
 }
