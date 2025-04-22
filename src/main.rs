@@ -1,3 +1,6 @@
-mod bencode;
+mod metainfo;
+mod utils;
+
+use utils::*;
 
 fn main() {}

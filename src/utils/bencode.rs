@@ -1,26 +1,25 @@
 use std::collections::HashMap;
 
 #[derive(Clone)]
-pub struct Bencode {}
+pub struct Bencode;
 
 impl Bencode {
     pub fn new() -> Self {
         Self {}
     }
-    // value for string is encoded as `<length>:<contents>`. Example: "5:hello"
-    // this function returns the string from encoded value
+    // Encoded as `<length>:<contents>`. Example: "5:hello"
     pub fn decode_string(self, encoded_string: &str) -> (&str, &str) {
         let (num, rest) = encoded_string.split_once(":").unwrap();
         let value = &rest[..(num.parse::<usize>().unwrap())];
+
         let rest = &encoded_string[(num.len() + 1 + value.len())..];
 
         (value, rest)
     }
 
-    // value for integer is encoded as `i<integer>e`. Example: i5e or i-5e
-    //
-    // Note: All integer with leading zero, such as: i-0e or i04e is invalid.
-    // However, i0e is valid, as it corresponds to integer `0`.
+    // Encoded as `i<integer>e`. Example: i5e or i-5e
+    // Note: All integer with leading zero, such as: i-0e or i04e are invalid.
+    // However, i0e is valid as it corresponds to integer 0.
     pub fn decode_integer(self, encoded_int: &str) -> (i64, &str) {
         let (value, rest) = encoded_int.split_at(1).1.split_once("e").unwrap();
 
@@ -36,24 +35,24 @@ impl Bencode {
         (num, rest)
     }
 
-    fn decoder(self, encoded_value: &str) -> (serde_json::Value, &str) {
+    pub fn decoder(self, encoded_value: &str) -> (serde_json::Value, &str) {
         match encoded_value.chars().next() {
-            // For string
+            // string decoding
             Some('0'..='9') => {
                 let (value, rest) = self.decode_string(encoded_value);
                 (value.into(), rest)
             }
 
-            // For integer
+            // integer decoding
             Some('i') => {
                 let (num, rest) = self.decode_integer(encoded_value);
                 (num.into(), rest)
             }
-            //For List
+            // list decoding
             //
-            // value for list is encoded as `l<bencoded_elements>e`. For example: l5:helloi69ee
+            // Encoded as `l<bencoded_elements>e`. For example: l5:helloi69ee.
             // Note: list may contain any bencoded type including integers, strings, dictionaries, and even lists.
-            // `l4:spam4:eggse` represents ["spam","eggs" ]. `le` represents empty list []
+            // Example: `l4:spam4:eggse` represents ["spam","eggs" ]. `le` represents empty list []
             Some('l') => {
                 let mut rest = encoded_value.split_at(1).1;
                 let mut list = Vec::new();
@@ -67,10 +66,10 @@ impl Bencode {
                 (list.into(), &rest[1..])
             }
 
-            // For dictionary
+            // dictionary decoding
             //
-            // value for dictionary is encoded as `d<key1><value1>..<keyN><ValueN>e`. For example: d3:foo3:bar5:helloi52ee
-            // key must be  string while value can be any type.
+            // Encoded as `d<key1><value1>..<keyN><ValueN>e`. For example: d3:foo3:bar5:helloi52ee
+            // Note: key must be  string while value can be of any type.
             Some('d') => {
                 let mut rest = encoded_value.split_at(1).1;
                 let mut hash: HashMap<String, serde_json::Value> = HashMap::new();
@@ -145,3 +144,5 @@ mod bencode_tester {
         println!("{}", output.0);
     }
 }
+
+// Todo: Make  `decode_integer` and `decode_string` private function(unless they are used somewhere else).
