@@ -1,3 +1,9 @@
+use serde::Deserialize;
+use serde::Serialize;
+use sha1::digest::generic_array::GenericArray;
+use sha1::digest::generic_array::typenum::U20;
+use sha1::{Digest, Sha1};
+
 use std::fs;
 use std::io::Error;
 use std::io::ErrorKind::InvalidInput;
@@ -5,10 +11,7 @@ use std::path::Path;
 
 use crate::bencode::Bencode;
 
-use serde::Deserialize;
-use serde::Serialize;
-
-#[derive(Default, Deserialize, Debug)]
+#[derive(Default, Deserialize, Debug, Serialize)]
 pub struct File {
     // length of the file in bytes (integer)
     pub length: usize,
@@ -17,7 +20,7 @@ pub struct File {
     pub path: Vec<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Serialize)]
 #[serde(untagged)]
 pub enum FileKey {
     SingleFile { length: usize },
@@ -30,13 +33,13 @@ impl Default for FileKey {
     }
 }
 
-#[derive(Default, Deserialize, Debug)]
-struct Info {
+#[derive(Default, Deserialize, Debug, Serialize)]
+pub struct Info {
     // UTF-8 encoded string which is the suggested name to save the file (for a singlefile case) or directory (for a multifile case) as. It is purely advisory.
     pub name: String,
     // Number of bytes in each piece the file is split into.
     #[serde(rename = "piece length")]
-    pub piece_length: u64,
+    pub piece_length: usize,
     // Length is a multiple of 20. It is to be subdivided into strings of length 20, each of which is the SHA1 hash of the piece at the corresponding index.
     pub pieces: Option<Vec<u8>>,
 
@@ -62,15 +65,15 @@ impl Info {
     }
 }
 
-#[derive(Default, Deserialize, Debug)]
-struct MetaInfo {
+#[derive(Default, Deserialize, Debug, Serialize)]
+pub struct TorrentFile {
     //  The URL of the tracker.
     pub announce: String,
     // This maps to a dictionary.
     pub info: Info,
 }
 
-impl MetaInfo {
+impl TorrentFile {
     pub fn new() -> Self {
         Self::default()
     }
@@ -91,60 +94,86 @@ impl MetaInfo {
     }
 
     pub fn parse_pieces<'a>(&self, encoded_value: &'a Vec<u8>) -> Option<(&'a [u8], usize)> {
+        let tag = b"6:pieces";
         if let Some(pieces_idx) = encoded_value
-            .windows(6)
-            .position(|window| window == b"pieces")
+            .windows(tag.len())
+            .position(|window| window == tag)
         {
-            let after_pieces = &encoded_value[pieces_idx + 6..];
+            let after_tag = &encoded_value[pieces_idx + tag.len()..];
+            let colon_idx = after_tag.iter().position(|b| b == &b':')?;
 
-            let delim_idx = after_pieces.iter().position(|b| b == &b':').unwrap();
-
-            let length = String::from_utf8(after_pieces[..delim_idx].to_vec())
-                .unwrap()
+            let length = std::str::from_utf8(&after_tag[..colon_idx])
+                .ok()?
                 .parse::<usize>()
-                .unwrap();
+                .ok()?;
+            let pieces_data = &after_tag[colon_idx + 1..colon_idx + length + 1];
 
-            let pieces_data = &after_pieces[delim_idx + 1..delim_idx + length + 1];
-
-            return Some((pieces_data, pieces_idx - 2));
+            return Some((pieces_data, pieces_idx));
         }
         None
     }
 
-    pub fn parse_file(
+    pub fn parse_metafile(
         &self,
         encoded_value: &Vec<u8>,
         pieces_data: &Vec<u8>,
         pieces_idx: usize,
-    ) -> MetaInfo {
+    ) -> TorrentFile {
         let bencoded = Bencode::new();
+
+        // This takes the value until the end of pieces value.
+        // After that, remaining are ignored
+        // NOTE/TODO: The end delimiter 'e' is also cutted out with this. Need to handle more gracefully
         let output = bencoded.decoder(&encoded_value[..pieces_idx]).0;
 
-        let mut finally: MetaInfo = serde_json::from_value(output).unwrap();
+        let mut finally: TorrentFile = serde_json::from_value(output).unwrap();
         finally.info.pieces = Some(pieces_data.to_vec());
         return finally;
+    }
+
+    pub fn info_parser<'a>(&self, encoded_value: &'a [u8]) -> Option<&'a [u8]> {
+        let tag = b"4:info";
+        if let Some(pos) = encoded_value.windows(tag.len()).position(|b| b == tag) {
+            let start = pos + tag.len();
+            let after_tag = &encoded_value[start..encoded_value.len() - 1];
+
+            return Some(after_tag);
+        };
+        None
+    }
+
+    pub fn sha1_hash(&self, data: &[u8]) -> GenericArray<u8, U20> {
+        let mut hasher = Sha1::new();
+        hasher.update(data);
+        hasher.finalize()
     }
 }
 
 #[cfg(test)]
 mod metainfo_tester {
+
     use super::*;
 
     #[test]
     fn test_read_file() {
-        let meta = MetaInfo::new();
+        let meta = TorrentFile::new();
 
         match meta.read_file(Path::new("./sample.torrent")) {
             Ok(output) => {
                 let (pieces_data, pieces_idx) = meta.parse_pieces(&output).unwrap();
-                let meta_info = meta.parse_file(&output, &pieces_data.to_vec(), pieces_idx);
+
+                let meta_info: TorrentFile =
+                    meta.parse_metafile(&output, &pieces_data.to_vec(), pieces_idx);
 
                 let (_length, _files) = match &meta_info.info.key {
                     FileKey::SingleFile { length } => (Some(length), None),
                     FileKey::MultiFile { files } => (None, Some(files)),
                 };
+                println!("Length: {:?}", _length);
 
-                println!("{:#?}", meta_info);
+                let info = meta_info.info_parser(&output).unwrap();
+                let hashed_info = meta_info.sha1_hash(info);
+                println!("hashed_info: {:02x}", hashed_info);
             }
 
             Err(e) => {
