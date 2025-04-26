@@ -123,7 +123,7 @@ impl TorrentFile {
 
         // This takes the value until the end of pieces value.
         // After that, remaining are ignored
-        // NOTE/TODO: The end delimiter 'e' is also cutted out with this. Need to handle more gracefully
+        // NOTE/TODO: The end delimiter 'e' is also cut out with this. Need to handle more gracefully
         let output = bencoded.decoder(&encoded_value[..pieces_idx]).0;
 
         let mut finally: TorrentFile = serde_json::from_value(output).unwrap();
@@ -169,11 +169,14 @@ mod metainfo_tester {
                     FileKey::SingleFile { length } => (Some(length), None),
                     FileKey::MultiFile { files } => (None, Some(files)),
                 };
+                println!("MetaInfo:{:?}", meta_info);
                 println!("Length: {:?}", _length);
 
                 let info = meta_info.info_parser(&output).unwrap();
                 let hashed_info = meta_info.sha1_hash(info);
                 println!("hashed_info: {:02x}", hashed_info);
+
+                println!("{:#?}", meta_info.info.pieces_hashes());
             }
 
             Err(e) => {
