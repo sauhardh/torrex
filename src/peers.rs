@@ -1,16 +1,12 @@
 use std::borrow::Cow;
 
 use reqwest;
-use serde::Serialize;
-use sha1::digest::generic_array::GenericArray;
-use sha1::digest::generic_array::typenum::U20;
-use urlencoding::encode_binary; // 0.8
+use serde::{Deserialize, Serialize};
 
-use crate::metainfo::TorrentFile;
-use crate::random;
+use crate::{bencode::Bencode, random};
 
 #[derive(Debug, Serialize)]
-enum Event {
+pub enum Event {
     started,
     completed,
     stopped,
@@ -18,7 +14,7 @@ enum Event {
 }
 
 #[derive(Default, Debug, Serialize)]
-struct RequestParams {
+pub struct RequestParams {
     /// URL encoded info hash of the torrent, 20 bytes long.
     info_hash: Vec<u8>,
     /// Each downloader generates its own id (string of length 20) at random at the start of a new download.
@@ -61,9 +57,7 @@ impl RequestParams {
         event: Option<Event>,
         compact: u32,
     ) -> Self {
-        // let infohash = encode_binary(&info_hash);
         Self {
-            // info_hash: infohash.to_string(),
             info_hash,
             peer_id,
             ip,
@@ -77,22 +71,53 @@ impl RequestParams {
     }
 }
 
-#[derive(Debug, Default)]
-struct ResponseParams {
+#[derive(Debug, Default, Deserialize)]
+pub struct ResponseParams {
+    /// Number of peers who have finished downloading
+    complete: u32,
+    /// Number of peers who are still downloading (leechers)
+    incomplete: u32,
+    /// Minimum seconds to wait before recontacting the tracker.
+    #[serde(rename = "min interval")]
+    min_interval: u32,
     /// An integer, indicating how often your client should make a request to the tracker.
     interval: u32,
-    /// A string, which contains list of peers that your client can connect to.
+    /// Dictionary which contains list of peers that your client can connect to.
     /// Each peer is represented using 6 bytes.
     /// The first 4 bytes are the peer's IP address and the last 2 bytes are the peer's port number.
-    peers: String,
+    peers: Vec<u8>,
+}
+
+impl ResponseParams {
+    // TODO
+    pub fn peers_ip(&self) -> Vec<String> {
+        let address = self
+            .peers
+            .chunks_exact(6)
+            .map(|chunk| {
+                let (ip_bytes, port_bytes) = chunk.split_at(4);
+                let port: u16 = ((port_bytes[0] as u16) << 8) | port_bytes[1] as u16;
+
+                let ip_addr = ip_bytes
+                    .iter()
+                    .map(|byte| byte.to_string())
+                    .collect::<Vec<_>>()
+                    .join(".");
+
+                format!("{ip_addr}:{port}")
+            })
+            .collect::<Vec<_>>();
+
+        address
+    }
 }
 
 #[derive(Debug, Default)]
-struct Peers {
+pub struct Peers {
     // URL itself,
     announce_url: String,
-    request: RequestParams,
-    response: ResponseParams,
+    pub request: RequestParams,
+    pub response: ResponseParams,
 }
 
 impl Peers {
@@ -100,7 +125,7 @@ impl Peers {
         Self::default()
     }
 
-    pub async fn request_tracker(&mut self, params: &RequestParams) {
+    pub async fn request_tracker(&mut self, params: &RequestParams) -> &Self {
         let client = reqwest::Client::new();
         let mut url = reqwest::Url::parse(&self.announce_url).unwrap();
 
@@ -125,9 +150,18 @@ impl Peers {
                 .append_pair("event", &format!("{:?}", event));
         }
 
-        let response = client.get(url).send().await.unwrap();
-        let body = response.bytes().await.unwrap();
-        println!("Got: {body:?}");
+        let res_body = client.get(url).send().await.unwrap().bytes().await.unwrap();
+
+        self.response =
+            serde_json::from_value::<ResponseParams>(Bencode::new().decoder(&res_body).0).unwrap();
+
+        self
+    }
+
+    pub fn announce_url(&mut self, url: String) -> &mut Self {
+        self.announce_url = url;
+
+        self
     }
 }
 
@@ -141,25 +175,18 @@ mod test_peers {
 
     #[tokio::test]
     async fn peers() {
-        let torr_file = TorrentFile::new();
-        let encoded_data = torr_file.read_file(Path::new("./sample.torrent")).unwrap();
+        let meta: TorrentFile = TorrentFile::new();
+        let encoded_data = meta.read_file(Path::new("./sample.torrent")).unwrap();
+        let meta: TorrentFile = meta.parse_metafile(&encoded_data);
 
-        let (pieces_data, pieces_idx) = torr_file.parse_pieces(&encoded_data).unwrap();
-
-        let meta_info: TorrentFile =
-            torr_file.parse_metafile(&encoded_data, &pieces_data.to_vec(), pieces_idx);
-
-        let info = meta_info.info_parser(&encoded_data).unwrap();
-        let info_hash = meta_info.sha1_hash(info);
-
-        let (_length, _files) = match &meta_info.info.key {
+        let (_length, _files) = match &meta.info.key {
             FileKey::SingleFile { length } => (Some(length), None),
             FileKey::MultiFile { files } => (None, Some(files)),
         };
-
-        let mut peers = Peers::new();
+        let info_hash = meta.info_hash(&encoded_data).unwrap();
 
         // Discovering peers
+        let mut peers = Peers::new();
         let params = &peers.request.build(
             info_hash.to_vec(),
             random::generate_peerid(), // random string
@@ -172,7 +199,13 @@ mod test_peers {
             1,
         );
 
-        peers.announce_url = meta_info.announce;
-        peers.request_tracker(params).await;
+        let ip_addr = peers
+            .announce_url(meta.announce)
+            .request_tracker(params)
+            .await
+            .response
+            .peers_ip();
+
+        println!("ip_adrr:{:?}", ip_addr);
     }
 }

@@ -35,7 +35,18 @@ impl Bencode {
         let value = &encoded_value[start..end];
         let rest = &encoded_value[end..];
 
-        (from_utf8(&value).unwrap().into(), rest)
+        match from_utf8(&value) {
+            Ok(s) => (serde_json::Value::String(s.to_string()), rest),
+            Err(_) => (
+                serde_json::Value::Array(
+                    value
+                        .iter()
+                        .map(|b| serde_json::Value::Number(serde_json::Number::from(*b)).into())
+                        .collect(),
+                ),
+                rest,
+            ),
+        }
     }
 
     /// Decodes the integer from the encoded( encoded as i<number>e ) value
