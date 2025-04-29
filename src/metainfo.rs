@@ -13,10 +13,11 @@ use crate::bencode::Bencode;
 
 #[derive(Default, Deserialize, Debug, Serialize)]
 pub struct File {
-    // length of the file in bytes (integer)
+    /// length of the file in bytes (integer)
     pub length: usize,
-    // a list containing one or more string elements that together represent the path and filename.
-    // Each element in the list corresponds to either a directory name or (in the case of the final element) the filename.
+    /// List containing one or more string elements that together represent the path and filename.
+    ///
+    /// Each element in the list corresponds to either a directory name or (in the case of the final element) the filename.
     pub path: Vec<String>,
 }
 
@@ -35,15 +36,15 @@ impl Default for FileKey {
 
 #[derive(Default, Deserialize, Debug, Serialize)]
 pub struct Info {
-    // UTF-8 encoded string which is the suggested name to save the file (for a singlefile case) or directory (for a multifile case) as. It is purely advisory.
+    /// UTF-8 encoded string which is suggested name to save the file (for a singlefile case) or directory (for a multifile case) as. It is purely advisory.
     pub name: String,
-    // Number of bytes in each piece the file is split into.
+    /// Number of bytes in each piece the file is split into.
     #[serde(rename = "piece length")]
     pub piece_length: usize,
-    // Length is a multiple of 20. It is to be subdivided into strings of length 20, each of which is the SHA1 hash of the piece at the corresponding index.
+    /// Length is a multiple of 20. It is to be subdivided into strings of length 20, each of which is the SHA1 hash of the piece at the corresponding index.
     pub pieces: Vec<u8>,
 
-    // Key for single file and multifile option.
+    /// Key for single file and multifile option.
     #[serde(flatten)]
     pub key: FileKey,
 }
@@ -65,9 +66,9 @@ impl Info {
 
 #[derive(Default, Deserialize, Debug, Serialize)]
 pub struct TorrentFile {
-    //  The URL of the tracker.
+    ///  The URL of the tracker.
     pub announce: String,
-    // This maps to a dictionary.
+    /// This maps to a dictionary.
     pub info: Info,
 }
 
@@ -137,11 +138,10 @@ mod metainfo_tester {
                     FileKey::SingleFile { length } => (Some(length), None),
                     FileKey::MultiFile { files } => (None, Some(files)),
                 };
-                println!("MetaInfo:{:#?}", meta_info);
 
                 let info_hash = meta_info.info_hash(&output).unwrap();
+                println!("MetaInfo:{:#?}", meta_info);
                 println!("info_hash: {:02x}", info_hash);
-
                 println!("Pieces Hash{:#?}", meta_info.info.pieces_hashes());
             }
 

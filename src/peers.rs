@@ -7,30 +7,31 @@ use crate::{bencode::Bencode, random};
 
 #[derive(Debug, Serialize)]
 pub enum Event {
-    started,
-    completed,
-    stopped,
-    empty, // This is same as not being present.
+    Started,
+    Completed,
+    Stopped,
+    /// This is same as not being present.
+    Empty,
 }
 
 #[derive(Default, Debug, Serialize)]
 pub struct RequestParams {
-    /// URL encoded info hash of the torrent, 20 bytes long.
-    info_hash: Vec<u8>,
-    /// Each downloader generates its own id (string of length 20) at random at the start of a new download.
+    /// **(required)**. URL encoded info hash of the torrent, 20 bytes long.
+    pub info_hash: Vec<u8>,
+    /// **(required)**. Each downloader generates its own id (string of length 20) at random at the start of a new download.
     /// This value will also almost certainly have to be escaped.
-    peer_id: String,
-    /// **(optional)** An optional parameter giving the IP (or dns name) which this peer is at.
+    pub peer_id: String,
+    /// **(optional)**. An optional parameter giving the IP (or dns name) which this peer is at.
     /// Generally used for the origin if it's on the same machine as the tracker.
     ip: Option<String>,
-    /// The port number this peer is listening on.
+    /// **(required)**.The port number this peer is listening on.
     /// Common behavior is for a downloader to try to listen on port 6881 and if that port is taken try 6882, then 6883, etc. and give up after 6889.
     port: usize,
-    /// The total amount uploaded so far, encoded in base ten ascii.
+    /// **(required)**. The total amount uploaded so far, encoded in base ten ascii.
     uploaded: usize,
-    /// The total amount downloaded so far, encoded in base ten ascii.
+    /// **(required)**. The total amount downloaded so far, encoded in base ten ascii.
     downloaded: usize,
-    /// The number of bytes this peer still has to download, encoded in base ten ascii.
+    /// **(required)**. The number of bytes this peer still has to download, encoded in base ten ascii.
     /// Note that this can't be computed from downloaded and the file length since it might be a resume,
     /// and there's a chance that some of the downloaded data failed an integrity check and had to be re-downloaded.
     left: usize,
@@ -38,14 +39,14 @@ pub struct RequestParams {
     /// If not present, this is one of the announcements done at regular intervals.
     /// No completed is sent if the file was complete when started. Downloaders send an announcement using stopped when they cease downloading.
     event: Option<Event>,
-    /// The compact format uses the same peers key in the bencoded tracker response,
+    /// **(required)**. The compact format uses the same peers key in the bencoded tracker response,
     /// but the value is a bencoded string rather than a bencoded list.
     /// compact=0 means client prefers original format, and compact=1 means client prefers compact format.
     compact: u32,
 }
 
 impl RequestParams {
-    pub fn build(
+    pub fn new(
         &self,
         info_hash: Vec<u8>,
         peer_id: String,
@@ -89,10 +90,8 @@ pub struct ResponseParams {
 }
 
 impl ResponseParams {
-    // TODO
     pub fn peers_ip(&self) -> Vec<String> {
-        let address = self
-            .peers
+        self.peers
             .chunks_exact(6)
             .map(|chunk| {
                 let (ip_bytes, port_bytes) = chunk.split_at(4);
@@ -106,15 +105,13 @@ impl ResponseParams {
 
                 format!("{ip_addr}:{port}")
             })
-            .collect::<Vec<_>>();
-
-        address
+            .collect::<Vec<_>>()
     }
 }
 
 #[derive(Debug, Default)]
 pub struct Peers {
-    // URL itself,
+    /// URL to request tracker for information.
     announce_url: String,
     pub request: RequestParams,
     pub response: ResponseParams,
@@ -187,7 +184,7 @@ mod test_peers {
 
         // Discovering peers
         let mut peers = Peers::new();
-        let params = &peers.request.build(
+        let params = &peers.request.new(
             info_hash.to_vec(),
             random::generate_peerid(), // random string
             None,

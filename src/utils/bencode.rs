@@ -11,8 +11,9 @@ impl Bencode {
         Self {}
     }
 
-    /// Decodes the string from the encoded( encoded as <length>:<string> ) value
-    /// Example: `5:hello -> hello`
+    /// Decodes the string from the encoded value. It is encoded as `<length>:<string>`
+    ///
+    /// Example: `5:helloworld -> hello`
     #[inline]
     fn decode_string(self, encoded_value: &[u8]) -> (Value, &[u8]) {
         let col_idx = encoded_value.iter().position(|byte| byte == &b':').unwrap();
@@ -49,9 +50,11 @@ impl Bencode {
         }
     }
 
-    /// Decodes the integer from the encoded( encoded as i<number>e ) value
+    /// Decodes the integer from the encoded value. It is encoded as `i<number>e`
+    ///
     /// Example: `i52e -> 52`
-    /// NOTE: all integers with leading 0 is invalid i.e. i-0e or i05e. BUT i0e is valid as 0 is an integer itself.
+    ///
+    /// NOTE: all integers with leading 0 is invalid i.e. `i-0e` or `i05e`. BUT `i0e` is valid as 0 is an integer itself.
     #[inline]
     fn decode_integer(self, encoded_value: &[u8]) -> (Value, &[u8]) {
         let end_idx = encoded_value.iter().position(|byte| byte == &b'e').unwrap();

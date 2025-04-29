@@ -1,3 +1,4 @@
+mod handshake;
 mod metainfo;
 mod peers;
 mod utils;
