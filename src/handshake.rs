@@ -1,7 +1,11 @@
-use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::SocketAddrV4;
+
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
 
 #[derive(Debug)]
+#[repr(C)]
 pub struct Handshake<'a> {
     /// Length of Protocol string `Bittorrent Protocol`, which is of length `19`, 1 Byte.
     length: u8,
@@ -36,8 +40,15 @@ impl<'a> Handshake<'a> {
         buffer.push(self.length);
         buffer.extend_from_slice(self.string.as_bytes());
         buffer.extend_from_slice(&self.reserved);
-        buffer.extend_from_slice(self.info_hash);
-        buffer.extend_from_slice(self.peer_id.as_bytes());
+
+        println!("self.infohash{:?}", &self.info_hash);
+        buffer.extend_from_slice(&self.info_hash);
+
+        let peer_bytes = self.peer_id.as_bytes();
+        if peer_bytes.len() != 20 {
+            println!("Not 20")
+        }
+        buffer.extend_from_slice(peer_bytes);
 
         println!("buffer: {:?}", buffer);
 
@@ -45,25 +56,27 @@ impl<'a> Handshake<'a> {
     }
 
     /// Start `TCP` connection for handshaking with peers
-    pub fn handshake(self, addr: String) -> Result<(), Box<dyn std::error::Error>> {
-        println!("addr: {addr:?}");
-        let mut stream = TcpStream::connect(addr)?;
+    pub async fn perform(self, addr: String) -> Result<(), Box<dyn std::error::Error>> {
+        let addr = addr.parse::<SocketAddrV4>()?;
+        let mut stream = TcpStream::connect(addr).await?;
+
         let buf = self.to_bytes();
-        stream.write_all(&buf)?;
-        let response = self.receive_handshake(&mut stream);
+        stream.write_all(&buf).await?;
+
+        let response = self.receive_handshake(&mut stream).await?;
+
         println!("response:{:?}", response);
         Ok(())
     }
 
-    pub fn receive_handshake(
+    pub async fn receive_handshake(
         self,
         stream: &mut TcpStream,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<[u8; 68], Box<dyn std::error::Error>> {
         let mut buf = [0u8; 68];
-        stream.read_exact(&mut buf)?;
+        stream.read_exact(&mut buf).await?;
 
-        println!("buf: {:?}", buf);
-        Ok(())
+        Ok(buf)
     }
 }
 
@@ -114,12 +127,19 @@ mod test_handshake {
             .response
             .peers_ip();
 
-        let handshake = Handshake::init(&peers.request.info_hash, peer_id.clone())
-            .handshake(ip_addr[1].clone());
-
-        println!("ip_addr: {:?}", ip_addr);
-        println!("info_hash: {:?}", info_hash);
-        println!("peer_id: {:?}", peer_id);
-        println!("Handshake: {:?}", handshake);
+        for addr in ip_addr {
+            match Handshake::init(&info_hash.to_vec(), peer_id.clone())
+                .perform(addr)
+                .await
+            {
+                Ok(received) => {
+                    println!("received:{:?}", received);
+                    break;
+                }
+                Err(err) => {
+                    println!("received:{}", err)
+                }
+            };
+        }
     }
 }
