@@ -40,23 +40,14 @@ impl<'a> Handshake<'a> {
         buffer.push(self.length);
         buffer.extend_from_slice(self.string.as_bytes());
         buffer.extend_from_slice(&self.reserved);
-
-        println!("self.infohash{:?}", &self.info_hash);
         buffer.extend_from_slice(&self.info_hash);
-
-        let peer_bytes = self.peer_id.as_bytes();
-        if peer_bytes.len() != 20 {
-            println!("Not 20")
-        }
-        buffer.extend_from_slice(peer_bytes);
-
-        println!("buffer: {:?}", buffer);
+        buffer.extend_from_slice(self.peer_id.as_bytes());
 
         buffer
     }
 
     /// Start `TCP` connection for handshaking with peers
-    pub async fn perform(self, addr: String) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn perform(&self, addr: String) -> Result<[u8; 68], Box<dyn std::error::Error>> {
         let addr = addr.parse::<SocketAddrV4>()?;
         let mut stream = TcpStream::connect(addr).await?;
 
@@ -64,19 +55,33 @@ impl<'a> Handshake<'a> {
         stream.write_all(&buf).await?;
 
         let response = self.receive_handshake(&mut stream).await?;
+        self.parse_handshake(response.to_vec());
 
-        println!("response:{:?}", response);
-        Ok(())
+        Ok(response)
     }
 
+    #[inline]
     pub async fn receive_handshake(
-        self,
+        &self,
         stream: &mut TcpStream,
     ) -> Result<[u8; 68], Box<dyn std::error::Error>> {
         let mut buf = [0u8; 68];
         stream.read_exact(&mut buf).await?;
 
         Ok(buf)
+    }
+
+    #[inline]
+    pub fn parse_handshake(&self, buf: Vec<u8>) {
+        let length = buf[0];
+        let string = &buf[1..20];
+        let reserved = &buf[20..28];
+        let info_hash = &buf[28..48];
+        let peer_id = &buf[48..];
+
+        println!(
+            "length:{length}\n string:{string:?}\nreserved:{reserved:?}\ninfo_hash:{info_hash:?}\npeer_id{peer_id:?}"
+        );
     }
 }
 
@@ -128,7 +133,7 @@ mod test_handshake {
             .peers_ip();
 
         for addr in ip_addr {
-            match Handshake::init(&info_hash.to_vec(), peer_id.clone())
+            match Handshake::init(&params.info_hash, peer_id.clone())
                 .perform(addr)
                 .await
             {
