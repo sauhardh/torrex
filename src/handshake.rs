@@ -16,12 +16,12 @@ pub struct Handshake<'a> {
     /// sh1 info hash (20 bytes)
     info_hash: &'a Vec<u8>,
     /// peer id, generate random 20 bytes value
-    peer_id: String,
+    peer_id: &'a [u8],
 }
 
 impl<'a> Handshake<'a> {
     /// Initialize the struct with parameter required for handshaking
-    pub fn init(info_hash: &'a Vec<u8>, peer_id: String) -> Self {
+    pub fn init(info_hash: &'a Vec<u8>, peer_id: &'a [u8]) -> Self {
         Self {
             length: 19,
             string: "BitTorrent protocol",
@@ -41,13 +41,16 @@ impl<'a> Handshake<'a> {
         buffer.extend_from_slice(self.string.as_bytes());
         buffer.extend_from_slice(&self.reserved);
         buffer.extend_from_slice(&self.info_hash);
-        buffer.extend_from_slice(self.peer_id.as_bytes());
+        buffer.extend_from_slice(self.peer_id);
 
         buffer
     }
 
     /// Start `TCP` connection for handshaking with peers
-    pub async fn perform(&self, addr: String) -> Result<[u8; 68], Box<dyn std::error::Error>> {
+    pub async fn perform(
+        &self,
+        addr: String,
+    ) -> Result<HandshakeReply, Box<dyn std::error::Error>> {
         let addr = addr.parse::<SocketAddrV4>()?;
         let mut stream = TcpStream::connect(addr).await?;
 
@@ -55,9 +58,9 @@ impl<'a> Handshake<'a> {
         stream.write_all(&buf).await?;
 
         let response = self.receive_handshake(&mut stream).await?;
-        self.parse_handshake(response.to_vec());
+        let reply = self.parse_handshake(&response);
 
-        Ok(response)
+        Ok(reply)
     }
 
     #[inline]
@@ -72,17 +75,32 @@ impl<'a> Handshake<'a> {
     }
 
     #[inline]
-    pub fn parse_handshake(&self, buf: Vec<u8>) {
+    pub fn parse_handshake(&self, buf: &[u8]) -> HandshakeReply {
         let length = buf[0];
-        let string = &buf[1..20];
-        let reserved = &buf[20..28];
-        let info_hash = &buf[28..48];
-        let peer_id = &buf[48..];
+        let string = String::from_utf8(buf[1..20].to_vec()).unwrap();
+        let reserved = buf[20..28].to_vec();
+        let info_hash = buf[28..48].to_vec();
+        let peer_id = buf[48..].to_vec();
 
-        println!(
-            "length:{length}\n string:{string:?}\nreserved:{reserved:?}\ninfo_hash:{info_hash:?}\npeer_id{peer_id:?}"
-        );
+        let reply = HandshakeReply {
+            length,
+            string,
+            reserved,
+            info_hash,
+            peer_id,
+        };
+
+        reply
     }
+}
+
+#[derive(Debug)]
+pub struct HandshakeReply {
+    length: u8,
+    string: String,
+    reserved: Vec<u8>,
+    info_hash: Vec<u8>,
+    peer_id: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -133,13 +151,18 @@ mod test_handshake {
             .peers_ip();
 
         for addr in ip_addr {
-            match Handshake::init(&params.info_hash, peer_id.clone())
+            match Handshake::init(&params.info_hash, peer_id.as_bytes())
                 .perform(addr)
                 .await
             {
                 Ok(received) => {
-                    println!("received:{:?}", received);
-                    break;
+                    let hex_peer_id: String = received
+                        .peer_id
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect();
+
+                    println!("Peer ID: {}", hex_peer_id);
                 }
                 Err(err) => {
                     println!("received:{}", err)
