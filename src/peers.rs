@@ -1,7 +1,7 @@
-use std::borrow::Cow;
-
 use reqwest;
 use serde::{Deserialize, Serialize};
+
+use std::borrow::Cow;
 
 use crate::{bencode::Bencode, random};
 
