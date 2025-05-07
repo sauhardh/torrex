@@ -148,7 +148,7 @@ impl Messages {
                 let length = if begin + block_size <= current_piece_len {
                     block_size
                 } else {
-                    piece_len - begin
+                    current_piece_len - begin
                 };
 
                 let mut msg: Vec<u8> = Vec::with_capacity(17);
@@ -165,6 +165,9 @@ impl Messages {
                     eprintln!("Failed to send request: {:?}", e);
                     break;
                 }
+
+                let piece = self.wait_pieces(stream).await;
+                println!("Pieces got: {:?}", piece);
 
                 println!(
                     "Sent request for piece {} begin {} length {}",

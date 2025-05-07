@@ -75,8 +75,8 @@ impl<'a> Connection<'a> {
         // Send the peer messages into block of 16 * 1024 through request message.
         msg.request(&mut self.stream, piece_len, file_size).await;
         // receive pieces right after request
-        let piece = msg.wait_pieces(&mut self.stream).await;
-        println!("Pieces got: {:?}", piece);
+        // let piece = msg.wait_pieces(&mut self.stream).await;
+        // println!("Pieces got: {:?}", piece);
     }
 }
 
