@@ -43,7 +43,6 @@ pub enum Messages {
     /// it will send duplicate request to other peers also. After getting the pieces from the "fastest" peers, other peers should be informed
     /// so, `Cancel` message is sent.
     Cancel { index: u32, begin: u32, length: u32 },
-
     /// Unknown message
     Unknown(u8, Vec<u8>), // Fallback
 }
@@ -126,6 +125,59 @@ impl Messages {
     /// This waits for the `Unchoke` message from the stream.
     /// Only after that we can initiate the `request`.
     pub async fn wait_unchoke(&self, stream: &mut TcpStream) -> Messages {
+        Self::start_exchange(stream).await.unwrap()
+    }
+
+    /// This request peers for `pieces` data.
+    pub async fn request(&self, stream: &mut TcpStream, piece_len: usize, file_size: usize) {
+        // Piece user is requesting
+        let total_pieces = (file_size + piece_len - 1) / piece_len;
+        let block_size = 16_384;
+
+        for index in 0..total_pieces {
+            let current_piece_len = if index == total_pieces - 1 {
+                file_size - (index * piece_len)
+            } else {
+                piece_len
+            };
+
+            let mut begin = 0;
+
+            while begin < current_piece_len {
+                // Note: Length will be `16 * 1024` except for the last blocks
+                let length = if begin + block_size <= current_piece_len {
+                    block_size
+                } else {
+                    piece_len - begin
+                };
+
+                let mut msg: Vec<u8> = Vec::with_capacity(17);
+                // Message length: 13 bytes of Payload (index, begin, length) + 1 bytes of message Id
+                msg.extend(&13u32.to_be_bytes());
+                // Message Id: 6 for `request` message type.
+                msg.push(6);
+                // Payload: (index, begin, length) each as 4 bytes.
+                msg.extend(&(index as u32).to_be_bytes());
+                msg.extend(&(begin as u32).to_be_bytes());
+                msg.extend(&(length as u32).to_be_bytes());
+
+                if let Err(e) = stream.write_all(&msg).await {
+                    eprintln!("Failed to send request: {:?}", e);
+                    break;
+                }
+
+                println!(
+                    "Sent request for piece {} begin {} length {}",
+                    index, begin, length
+                );
+
+                begin += length;
+            }
+        }
+    }
+
+    /// This waits for pieces message from the peers right after sending `request` message
+    pub async fn wait_pieces(&self, stream: &mut TcpStream) -> Messages {
         Self::start_exchange(stream).await.unwrap()
     }
 }

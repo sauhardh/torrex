@@ -1,4 +1,3 @@
-use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -56,7 +55,7 @@ impl<'a> Connection<'a> {
         Ok(self)
     }
 
-    pub async fn peer_messages(&mut self) {
+    pub async fn peer_messages(&mut self, piece_len: usize, file_size: usize) {
         let msg = self::Messages::start_exchange(&mut self.stream)
             .await
             .unwrap();
@@ -72,6 +71,12 @@ impl<'a> Connection<'a> {
         }
 
         println!("Got: {:?}", unchoke_msg.unwrap());
+
+        // Send the peer messages into block of 16 * 1024 through request message.
+        msg.request(&mut self.stream, piece_len, file_size).await;
+        // receive pieces right after request
+        let piece = msg.wait_pieces(&mut self.stream).await;
+        println!("Pieces got: {:?}", piece);
     }
 }
 
@@ -84,6 +89,7 @@ mod test_connection {
     use crate::peers::Peers;
     use crate::utils::random;
 
+    use std::fs::File;
     use std::path::Path;
 
     #[tokio::test]
@@ -139,9 +145,11 @@ mod test_connection {
                         .collect();
 
                     println!("Peer Id: {peer_id}");
+                    println!("Piece length {:?}", meta.info.piece_length);
+                    println!("Piece: {:?}", meta.info.pieces);
 
-                    conn.peer_messages().await;
-
+                    conn.peer_messages(meta.info.piece_length, _length.unwrap().clone())
+                        .await;
                     break;
                 }
                 Err(err) => {

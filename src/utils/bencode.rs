@@ -1,7 +1,7 @@
+use serde_json::Value;
+
 use std::collections::HashMap;
 use std::str::from_utf8;
-
-use serde_json::Value;
 
 #[derive(Clone, PartialEq)]
 pub struct Bencode;
@@ -123,7 +123,6 @@ impl Bencode {
                 }
 
                 let value = serde_json::Value::Object(hash.into_iter().collect());
-
                 let rest = if rest.len() > 1 { &rest[1..] } else { &rest };
 
                 (value, rest)

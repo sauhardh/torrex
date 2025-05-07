@@ -43,7 +43,6 @@ pub struct Info {
     pub piece_length: usize,
     /// Length is a multiple of 20. It is to be subdivided into strings of length 20, each of which is the SHA1 hash of the piece at the corresponding index.
     pub pieces: Vec<u8>,
-
     /// Key for single file and multifile option.
     #[serde(flatten)]
     pub key: FileKey,
