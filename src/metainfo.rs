@@ -2,7 +2,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use sha1::digest::generic_array::GenericArray;
 use sha1::digest::generic_array::typenum::U20;
-use sha1::{Digest, Sha1};
 
 use std::fs;
 use std::io::Error;
@@ -10,6 +9,7 @@ use std::io::ErrorKind::InvalidInput;
 use std::path::Path;
 
 use crate::bencode::Bencode;
+use crate::cryptography::sha1_hash;
 
 #[derive(Default, Deserialize, Debug, Serialize)]
 pub struct File {
@@ -106,17 +106,10 @@ impl TorrentFile {
             let start = pos + tag.len();
             let after_tag = &encoded_value[start..encoded_value.len() - 1];
 
-            let hashed = self.sha1_hash(after_tag);
+            let hashed = sha1_hash(after_tag);
             return Some(hashed);
         };
         None
-    }
-
-    #[inline]
-    pub fn sha1_hash(&self, data: &[u8]) -> GenericArray<u8, U20> {
-        let mut hasher = Sha1::new();
-        hasher.update(data);
-        hasher.finalize()
     }
 }
 

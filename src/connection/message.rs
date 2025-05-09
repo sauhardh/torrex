@@ -1,6 +1,14 @@
+use std::sync::Arc;
+// use std::sync::Mutex;
+
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::Sender;
+
+use crate::cryptography::sha1_hash;
 
 /// Messages to send to a peer. It's to exchange multiple peer messages to download the file.
 #[derive(Debug, PartialEq)]
@@ -129,7 +137,14 @@ impl Messages {
     }
 
     /// This request peers for `pieces` data.
-    pub async fn request(&self, stream: &mut TcpStream, piece_len: usize, file_size: usize) {
+    #[inline]
+    async fn request(
+        &self,
+        stream: &mut TcpStream,
+        piece_len: usize,
+        file_size: usize,
+        tx: Sender<Vec<u8>>,
+    ) {
         // Piece user is requesting
         let total_pieces = (file_size + piece_len - 1) / piece_len;
         let block_size = 16_384;
@@ -167,7 +182,25 @@ impl Messages {
                 }
 
                 let piece = self.wait_pieces(stream).await;
-                println!("Pieces got: {:?}", piece);
+
+                // Sending This piece data to the receiver.
+                let _tx: Sender<Vec<u8>> = tx.clone();
+                let _ = tokio::spawn(async move {
+                    match piece {
+                        Self::Piece {
+                            index,
+                            begin,
+                            block,
+                        } => {
+                            let _ = _tx.send(block).await;
+                        }
+
+                        _ => {
+                            eprintln!("Didn't match the type 'Message'.")
+                        }
+                    };
+                })
+                .await;
 
                 println!(
                     "Sent request for piece {} begin {} length {}",
@@ -177,6 +210,33 @@ impl Messages {
                 begin += length;
             }
         }
+    }
+
+    pub async fn request_msg(&self, piece_len: usize, file_size: usize, stream: &mut TcpStream) {
+        // Channel to receive blocks from the request logic
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(16_384);
+        let total_value = Arc::new(Mutex::new(Vec::new()));
+
+        // Task to collect all received blocks into `total_value`
+        let total_value_clone = Arc::clone(&total_value);
+        let collector_handle = tokio::spawn(async move {
+            while let Some(block) = rx.recv().await {
+                let mut tot = total_value_clone.lock().await;
+                tot.extend_from_slice(&block);
+            }
+        });
+
+        // Start the request logic
+        {
+            self.request(stream, piece_len, file_size, tx).await;
+        }
+
+        let val = sha1_hash(&total_value.lock().await).to_vec();
+        println!("val is  {:?}", val);
+
+        // Wait for the collector task to complete
+        // This will finish only if the `request` method finishes and `tx` is dropped
+        let _ = collector_handle.await;
     }
 
     /// This waits for pieces message from the peers right after sending `request` message

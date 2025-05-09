@@ -1,7 +1,9 @@
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 
 use std::net::SocketAddrV4;
+use std::sync::Arc;
 
 use crate::handshake::Handshake;
 use crate::handshake::HandshakeReply;
@@ -72,8 +74,9 @@ impl<'a> Connection<'a> {
 
         println!("Got: {:?}", unchoke_msg.unwrap());
 
-        // Send the peer messages into block of 16 * 1024 through request message.
-        msg.request(&mut self.stream, piece_len, file_size).await;
+        msg.request_msg(piece_len, file_size, &mut self.stream)
+            .await;
+
         // receive pieces right after request
         // let piece = msg.wait_pieces(&mut self.stream).await;
         // println!("Pieces got: {:?}", piece);
@@ -150,6 +153,7 @@ mod test_connection {
 
                     conn.peer_messages(meta.info.piece_length, _length.unwrap().clone())
                         .await;
+
                     break;
                 }
                 Err(err) => {
