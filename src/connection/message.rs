@@ -234,9 +234,9 @@ impl Messages {
                     } => {
                         // It check for integrity of the blocks received
                         mapped_block.entry(index).or_default().push(block);
-                        received_block_size.insert(index, piece_begin_at);
+                        *received_block_size.entry(index).or_insert(0) += length;
 
-                        if received_block_size.get(&index).unwrap() + length >= actual_piece_len {
+                        if *received_block_size.get(&index).unwrap() >= actual_piece_len {
                             let piece_blocks = mapped_block.get(&index).unwrap().concat();
 
                             mapped_block.remove(&index);

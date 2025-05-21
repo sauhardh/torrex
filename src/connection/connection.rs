@@ -158,7 +158,7 @@ mod test_connection {
                         .collect();
 
                     // Hardcode value for temporary use
-                    let file_path = "/tmp/tasty.txt".to_string();
+                    let file_path = "/tmp/goated.txt".to_string();
 
                     // To explicitly request particular piece to download
                     let requested_piece_idx = None;
