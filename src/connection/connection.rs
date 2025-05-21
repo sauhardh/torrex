@@ -5,6 +5,7 @@ use std::net::SocketAddrV4;
 
 use crate::handshake::Handshake;
 use crate::handshake::HandshakeReply;
+use crate::message::MessageType;
 use crate::message::Messages;
 
 #[derive(Debug)]
@@ -12,11 +13,12 @@ pub struct Connection<'a> {
     stream: TcpStream,
     handshake: Option<Handshake<'a>>,
     handshake_reply: Option<HandshakeReply>,
+    // messages: Option<MessageType>,
     messages: Option<Messages>,
 }
 
 impl<'a> Connection<'a> {
-    /// Start `TCP` connection
+    /// Starts `TCP` connection with ip address being passed as parameter.
     pub async fn start_connection(addr: String) -> Result<Self, Box<dyn std::error::Error>> {
         // Starts the connection
         let addr = addr.parse::<SocketAddrV4>()?;
@@ -30,6 +32,9 @@ impl<'a> Connection<'a> {
         })
     }
 
+    /// Initiate Handshaking with peer.
+    ///
+    /// If peer reply with the same data which was passed, Handshake will be marked as completed.
     pub async fn start_handshaking(
         &mut self,
         info_hash: &'a Vec<u8>,
@@ -55,6 +60,9 @@ impl<'a> Connection<'a> {
         Ok(self)
     }
 
+    /// Everything needed to start peer message.
+    ///
+    /// waits for bitfield from peers -> Sends interested message to the peer -> waits for unchoke message -> receive pieces and download it to a file.
     pub async fn peer_messages(
         &mut self,
         piece_len: usize,
@@ -64,17 +72,33 @@ impl<'a> Connection<'a> {
         requested_piece_idx: Option<u32>,
     ) {
         // This waits for bitfield message from peer indicating which pieces it has.
+        // let msg = self::Messages::start_exchange(&mut self.stream)
+        //     .await
+        //     .unwrap();
 
-        let msg = self::Messages::start_exchange(&mut self.stream)
-            .await
-            .unwrap();
+        // let msg = self
+        //     .messages
+        //     .as_mut()
+        //     .unwrap()
+        //     .start_exchange(&mut self.stream)
+        //     .await
+        //     .unwrap();
+
+        let mut init_msg = Messages::init(
+            MessageType::Unknown(0, vec![]),
+            file_path.clone(),
+            requested_piece_idx,
+        );
+
+        let msg = init_msg.start_exchange(&mut self.stream).await.unwrap();
 
         // This sends the Message Type Interested
         msg.interested(&mut self.stream).await;
-        let mut unchoke_msg: Option<Messages> = None;
+        let mut unchoke_msg: Option<MessageType> = None;
 
         // This waits for unchoke message from peer, until then it cannot proceed.
-        while unchoke_msg.is_none() || unchoke_msg != Some(Messages::Unchoke) {
+        while unchoke_msg.is_none() || unchoke_msg != Some(MessageType::Unchoke) {
+            // unchoke_msg = Some(msg.wait_unchoke(&mut self.stream).await);
             unchoke_msg = Some(msg.wait_unchoke(&mut self.stream).await);
         }
 
@@ -158,7 +182,7 @@ mod test_connection {
                         .collect();
 
                     // Hardcode value for temporary use
-                    let file_path = "/tmp/goated.txt".to_string();
+                    let file_path = "/tmp/callmedaddy.txt".to_string();
 
                     // To explicitly request particular piece to download
                     let requested_piece_idx = None;

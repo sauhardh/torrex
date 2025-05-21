@@ -1,10 +1,7 @@
-use rand::rand_core::le;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::Sender;
 
 use std::collections::HashMap;
 use std::vec;
@@ -12,33 +9,44 @@ use std::vec;
 use crate::cryptography::sha1_hash;
 
 /// Messages to send to a peer. It's to exchange multiple peer messages to download the file.
-#[derive(Debug, PartialEq)]
-pub enum Messages {
+#[derive(Debug, PartialEq, Clone)]
+pub enum MessageType {
     /// Not uploading to them right now.
-    /// Have no payload.
+    ///
+    /// Has no payload.
     Choke,
-    /// Allowing to upload to them
-    /// Have no payload
+    /// Allowing to upload to them.
+    ///
+    /// Has no payload
     Unchoke,
     /// To receive something another peer has.
-    /// Have no payload
+    ///
+    /// Has no payload
     Interested,
     /// To not receive something another peer has.
-    /// Have no payload
+    ///
+    /// Has no payload
     NotInterested,
     /// Represents pieces that just finished downloading.
+    ///
     /// Single payload. The index which that downloader just completed and checked the hash of.
     Have(u32),
     /// Represents bitfield showing all the pieces peer has.
+    ///
     /// `bitfield` is only ever sent as first message.
+    ///
     /// It's payload is a bitfield which each index that downloader has sent set to one and rest set to zero.
     BitField(Vec<u8>),
     /// Contains `index`, `begin`, `length`. Last two are byte offsets.
+    ///
     /// Requesting data of `length` bytes from `index`, starting at byte offset `begin`.
+    ///
     /// Length is generally power of two.
+    ///
     /// All current implementation use `2^16 (16 KiB)`, and close connections which request an amount greater than that.
     Request { index: u32, begin: u32, length: u32 },
     /// Response to the request.
+    ///
     /// Contains, `index`, `begin`, and `block`.
     Piece {
         index: u32,
@@ -46,8 +54,8 @@ pub enum Messages {
         block: Vec<u8>,
     },
     /// Same payload as `request` messages.
-    /// They are generally sent towards the end of the download (endgame mode).
     ///
+    /// They are generally sent towards the end of the download (endgame mode).
     /// To make sure the last few pieces come in quickly (incase some slow peer is holding it.),
     /// it will send duplicate request to other peers also. After getting the pieces from the "fastest" peers, other peers should be informed
     /// so, `Cancel` message is sent.
@@ -56,10 +64,34 @@ pub enum Messages {
     Unknown(u8, Vec<u8>), // Fallback
 }
 
+#[derive(Debug)]
+pub struct Messages {
+    message_type: MessageType,
+    save_to: String,
+    requested_pieces: Option<u32>,
+}
+
 impl Messages {
+    pub fn init(message_type: MessageType, save_to: String, requested_pieces: Option<u32>) -> Self {
+        Self {
+            message_type,
+            save_to,
+            requested_pieces,
+        }
+    }
+    async fn enter_message_type(&mut self, messages: MessageType) {
+        self.message_type = messages;
+    }
+
+    /// This reads message from the stream. At first it reads message of 5 bytes Having length of 4 bytes and Message ID 1 bytes.
+    ///
+    /// Then, Payload of dynamic size is read having size of message length received in earlier read.
+    ///
+    /// Returns Message type with payload if it has.
     pub async fn start_exchange(
+        &mut self,
         stream: &mut TcpStream,
-    ) -> Result<Messages, Box<dyn std::error::Error>> {
+    ) -> Result<&mut Messages, Box<dyn std::error::Error>> {
         // Read the length (4 bytes) + message ID (1 bytes)
         let mut msg: [u8; 5] = [0u8; 5];
 
@@ -69,25 +101,26 @@ impl Messages {
         let msg_id = msg[4];
 
         if msg_len == 0 {
-            return Ok(Messages::Unknown(0, vec![]));
+            self.message_type = MessageType::Unknown(0, vec![]);
+            return Ok(self);
         }
         let mut payload = vec![0u8; (msg_len - 1) as usize];
         stream.read_exact(&mut payload).await?;
 
         let message = match msg_id {
-            // 'choke', 'unchoke', 'interested', and 'not interested' have no payload.
-            0 => Messages::Choke,
-            1 => Messages::Unchoke,
-            2 => Messages::Interested,
-            3 => Messages::NotInterested,
+            // 'choke', 'unchoke', 'interested', and 'not interested' has no payload.
+            0 => MessageType::Choke,
+            1 => MessageType::Unchoke,
+            2 => MessageType::Interested,
+            3 => MessageType::NotInterested,
             // Have
             4 => {
                 let index = u32::from_be_bytes(payload[..4].try_into()?);
-                Messages::Have(index)
+                MessageType::Have(index)
             }
 
             // BitField
-            5 => Messages::BitField(payload.clone()),
+            5 => MessageType::BitField(payload.clone()),
 
             // 6 - Request, 7 - Piece, 8 - Cancel
             6 => {
@@ -95,7 +128,7 @@ impl Messages {
                 let begin = u32::from_be_bytes(payload[4..8].try_into()?);
                 let length = u32::from_be_bytes(payload[8..12].try_into()?);
 
-                Messages::Request {
+                MessageType::Request {
                     index,
                     begin,
                     length,
@@ -106,7 +139,7 @@ impl Messages {
                 let begin = u32::from_be_bytes(payload[4..8].try_into()?);
                 let block = payload[8..].to_vec();
 
-                Messages::Piece {
+                MessageType::Piece {
                     index,
                     begin,
                     block,
@@ -117,20 +150,22 @@ impl Messages {
                 let begin = u32::from_be_bytes(payload[4..8].try_into()?);
                 let length = u32::from_be_bytes(payload[8..12].try_into()?);
 
-                Messages::Cancel {
+                MessageType::Cancel {
                     index,
                     begin,
                     length,
                 }
             }
 
-            _ => Messages::Unknown(msg_id, payload.clone()),
+            _ => MessageType::Unknown(msg_id, payload.clone()),
         };
 
-        Ok(message)
+        self.message_type = message;
+        Ok(self)
     }
 
-    /// Sends a interested message of id 2.
+    /// Sends a interested message of `id 2`.
+    ///
     /// Payload for this message is empty
     pub async fn interested(&self, stream: &mut TcpStream) -> &Self {
         let _ = stream.write_all(&[0, 0, 0, 1, 2]).await;
@@ -140,28 +175,30 @@ impl Messages {
 
     /// This waits for the `Unchoke` message from the stream.
     /// Only after that we can initiate the `request`.
-    pub async fn wait_unchoke(&self, stream: &mut TcpStream) -> Messages {
-        match Self::start_exchange(stream).await {
-            Ok(msg) => msg,
+    ///
+    /// Internally It calls `start_exchange` function. This returns of type `Message`.
+    // pub async fn wait_unchoke(&self, stream: &mut TcpStream) -> Messages {
+    pub async fn wait_unchoke(&mut self, stream: &mut TcpStream) -> MessageType {
+        match self.start_exchange(stream).await {
+            Ok(msg) => msg.message_type.clone(),
             Err(e) => {
                 eprintln!("Failed to receive message: {:?}", e);
-                return Messages::Unknown(0, vec![]);
+                return MessageType::Unknown(0, vec![]);
             }
         }
     }
 
-    async fn send_block(
+    /// Sends `Request` Message to the peer. It has Message `Id` of 6. And payload having `index`, `begin` and `length`.
+    #[inline]
+    async fn send_request_msg(
         &self,
         stream: &mut TcpStream,
         index: u32,
         begin: u32,
         length: u32,
-    ) -> Result<(), Box<dyn std::error::Error>>
-// -> Result<Messages, Box<dyn std::error::Error>>
-    {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Message Id for `request` is 6
         // Payload consist of `index`, `begin`, `length`
-
         let mut msg: Vec<u8> = Vec::with_capacity(17);
         // Message length: 13 bytes of Payload (index, begin, length) + 1 bytes of message Id
         msg.extend(&13u32.to_be_bytes());
@@ -175,15 +212,14 @@ impl Messages {
         // Sending the request message
         stream.write_all(&msg).await?;
 
-        // This returns the message got after sending the `request`.
-        // Self::start_exchange(&mut stream).await
         Ok(())
     }
 
-    /// This request peers for `pieces` data.
-    #[inline]
+    /// For requesting message and waiting for pieces. Internally, it calls function of particular tasks like sending request and waiting for pieces.
+    ///
+    /// This compiles the functionality as such: request message -> wait for pieces blocks -> combine blocks to form pieces -> check integrity -> make/append data to file.
     pub async fn request_and_receive_pieces(
-        &self,
+        &mut self,
         stream: &mut TcpStream,
         piece_len: usize,
         file_size: usize,
@@ -197,7 +233,6 @@ impl Messages {
 
         let mut mapped_block: HashMap<u32, Vec<Vec<u8>>> = HashMap::new();
         let mut received_block_size: HashMap<u32, usize> = HashMap::new();
-        // let mut current_index: u32 = 0;
 
         for index in 0..total_pieces {
             // Just if incase there is explicitly request for certain piece_idx
@@ -222,12 +257,12 @@ impl Messages {
 
                 // To send the `request` block to the peer.
                 let _ = self
-                    .send_block(stream, index as u32, piece_begin_at as u32, length as u32)
+                    .send_request_msg(stream, index as u32, piece_begin_at as u32, length as u32)
                     .await;
                 let piece = self.wait_pieces(stream).await;
 
                 match piece {
-                    Self::Piece {
+                    MessageType::Piece {
                         index,
                         begin: _,
                         block,
@@ -265,6 +300,9 @@ impl Messages {
         }
     }
 
+    /// This checks integrity of the pieces received from peers.
+    ///
+    /// It compares `sha1` hash got from torrent file with `sha1` hash of each pieces on particular index.
     #[inline]
     fn check_integrity(&self, block: &Vec<u8>, pieces: &Vec<String>, index: usize) -> bool {
         let val = sha1_hash(&block).to_vec();
@@ -280,12 +318,13 @@ impl Messages {
     }
 
     /// This waits for pieces message from the peers right after sending `request` message
-    pub async fn wait_pieces(&self, stream: &mut TcpStream) -> Messages {
-        match Self::start_exchange(stream).await {
-            Ok(msg) => msg,
+    #[inline]
+    async fn wait_pieces(&mut self, stream: &mut TcpStream) -> MessageType {
+        match self.start_exchange(stream).await {
+            Ok(msg) => msg.message_type.clone(),
             Err(e) => {
                 eprintln!("Failed to receive message: {:?}", e);
-                return Messages::Unknown(0, vec![]);
+                return MessageType::Unknown(0, vec![]);
             }
         }
     }
