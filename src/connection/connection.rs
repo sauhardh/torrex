@@ -1,9 +1,7 @@
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
 
 use std::net::SocketAddrV4;
-use std::sync::Arc;
 
 use crate::handshake::Handshake;
 use crate::handshake::HandshakeReply;
@@ -57,29 +55,42 @@ impl<'a> Connection<'a> {
         Ok(self)
     }
 
-    pub async fn peer_messages(&mut self, piece_len: usize, file_size: usize) {
+    pub async fn peer_messages(
+        &mut self,
+        piece_len: usize,
+        file_size: usize,
+        pieces: &Vec<String>,
+        file_path: &String,
+        requested_piece_idx: Option<u32>,
+    ) {
+        // This waits for bitfield message from peer indicating which pieces it has.
+
         let msg = self::Messages::start_exchange(&mut self.stream)
             .await
             .unwrap();
 
-        println!("Message: {:?}", msg);
-
+        // This sends the Message Type Interested
         msg.interested(&mut self.stream).await;
         let mut unchoke_msg: Option<Messages> = None;
 
+        // This waits for unchoke message from peer, until then it cannot proceed.
         while unchoke_msg.is_none() || unchoke_msg != Some(Messages::Unchoke) {
             unchoke_msg = Some(msg.wait_unchoke(&mut self.stream).await);
-            println!("Waiting for unchoke message from peers...");
         }
 
-        println!("Got: {:?}", unchoke_msg.unwrap());
-
-        msg.request_msg(piece_len, file_size, &mut self.stream)
-            .await;
+        // This is for downloading all pieces
+        msg.request_and_receive_pieces(
+            &mut self.stream,
+            piece_len,
+            file_size,
+            &pieces,
+            file_path,
+            requested_piece_idx,
+        )
+        .await;
 
         // receive pieces right after request
         // let piece = msg.wait_pieces(&mut self.stream).await;
-        // println!("Pieces got: {:?}", piece);
     }
 }
 
@@ -92,7 +103,6 @@ mod test_connection {
     use crate::peers::Peers;
     use crate::utils::random;
 
-    use std::fs::File;
     use std::path::Path;
 
     #[tokio::test]
@@ -147,12 +157,20 @@ mod test_connection {
                         .map(|b| format!("{:02x}", b))
                         .collect();
 
-                    println!("Peer Id: {peer_id}");
-                    println!("Piece length {:?}", meta.info.piece_length);
-                    println!("Piece: {:?}", meta.info.pieces);
+                    // Hardcode value for temporary use
+                    let file_path = "/tmp/tasty.txt".to_string();
 
-                    conn.peer_messages(meta.info.piece_length, _length.unwrap().clone())
-                        .await;
+                    // To explicitly request particular piece to download
+                    let requested_piece_idx = None;
+
+                    conn.peer_messages(
+                        meta.info.piece_length,
+                        _length.unwrap().clone(),
+                        &meta.info.pieces_hashes(),
+                        &file_path,
+                        requested_piece_idx,
+                    )
+                    .await;
 
                     break;
                 }

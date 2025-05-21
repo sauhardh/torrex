@@ -1,12 +1,13 @@
-use std::sync::Arc;
-// use std::sync::Mutex;
-
+use rand::rand_core::le;
+use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
+
+use std::collections::HashMap;
+use std::vec;
 
 use crate::cryptography::sha1_hash;
 
@@ -67,10 +68,9 @@ impl Messages {
         let msg_len = u32::from_be_bytes(msg[0..4].try_into()?);
         let msg_id = msg[4];
 
-        if msg_len < 1 {
-            return Err("Not Enough Message Length".into());
+        if msg_len == 0 {
+            return Ok(Messages::Unknown(0, vec![]));
         }
-
         let mut payload = vec![0u8; (msg_len - 1) as usize];
         stream.read_exact(&mut payload).await?;
 
@@ -90,32 +90,40 @@ impl Messages {
             5 => Messages::BitField(payload.clone()),
 
             // 6 - Request, 7 - Piece, 8 - Cancel
-            6 | 7 | 8 => {
+            6 => {
                 let index = u32::from_be_bytes(payload[0..4].try_into()?);
                 let begin = u32::from_be_bytes(payload[4..8].try_into()?);
                 let length = u32::from_be_bytes(payload[8..12].try_into()?);
 
-                if msg_id == 6 {
-                    Messages::Request {
-                        index,
-                        begin,
-                        length,
-                    }
-                } else if msg_id == 8 {
-                    Messages::Cancel {
-                        index,
-                        begin,
-                        length,
-                    }
-                } else {
-                    let block = payload[8..].to_vec();
-                    Messages::Piece {
-                        index,
-                        begin,
-                        block,
-                    }
+                Messages::Request {
+                    index,
+                    begin,
+                    length,
                 }
             }
+            7 => {
+                let index = u32::from_be_bytes(payload[0..4].try_into()?);
+                let begin = u32::from_be_bytes(payload[4..8].try_into()?);
+                let block = payload[8..].to_vec();
+
+                Messages::Piece {
+                    index,
+                    begin,
+                    block,
+                }
+            }
+            8 => {
+                let index = u32::from_be_bytes(payload[0..4].try_into()?);
+                let begin = u32::from_be_bytes(payload[4..8].try_into()?);
+                let length = u32::from_be_bytes(payload[8..12].try_into()?);
+
+                Messages::Cancel {
+                    index,
+                    begin,
+                    length,
+                }
+            }
+
             _ => Messages::Unknown(msg_id, payload.clone()),
         };
 
@@ -133,114 +141,152 @@ impl Messages {
     /// This waits for the `Unchoke` message from the stream.
     /// Only after that we can initiate the `request`.
     pub async fn wait_unchoke(&self, stream: &mut TcpStream) -> Messages {
-        Self::start_exchange(stream).await.unwrap()
+        match Self::start_exchange(stream).await {
+            Ok(msg) => msg,
+            Err(e) => {
+                eprintln!("Failed to receive message: {:?}", e);
+                return Messages::Unknown(0, vec![]);
+            }
+        }
+    }
+
+    async fn send_block(
+        &self,
+        stream: &mut TcpStream,
+        index: u32,
+        begin: u32,
+        length: u32,
+    ) -> Result<(), Box<dyn std::error::Error>>
+// -> Result<Messages, Box<dyn std::error::Error>>
+    {
+        // Message Id for `request` is 6
+        // Payload consist of `index`, `begin`, `length`
+
+        let mut msg: Vec<u8> = Vec::with_capacity(17);
+        // Message length: 13 bytes of Payload (index, begin, length) + 1 bytes of message Id
+        msg.extend(&13u32.to_be_bytes());
+        // Message Id: 6 for `request` message type.
+        msg.push(6);
+        // Payload: (index, begin, length) each as 4 bytes.
+        msg.extend(&(index as u32).to_be_bytes());
+        msg.extend(&(begin as u32).to_be_bytes());
+        msg.extend(&(length as u32).to_be_bytes());
+
+        // Sending the request message
+        stream.write_all(&msg).await?;
+
+        // This returns the message got after sending the `request`.
+        // Self::start_exchange(&mut stream).await
+        Ok(())
     }
 
     /// This request peers for `pieces` data.
     #[inline]
-    async fn request(
+    pub async fn request_and_receive_pieces(
         &self,
         stream: &mut TcpStream,
         piece_len: usize,
         file_size: usize,
-        tx: Sender<Vec<u8>>,
+        pieces: &Vec<String>,
+        file_path: &String,
+        requested_piece_idx: Option<u32>,
     ) {
         // Piece user is requesting
         let total_pieces = (file_size + piece_len - 1) / piece_len;
         let block_size = 16_384;
 
+        let mut mapped_block: HashMap<u32, Vec<Vec<u8>>> = HashMap::new();
+        let mut received_block_size: HashMap<u32, usize> = HashMap::new();
+        // let mut current_index: u32 = 0;
+
         for index in 0..total_pieces {
-            let current_piece_len = if index == total_pieces - 1 {
+            // Just if incase there is explicitly request for certain piece_idx
+            if requested_piece_idx.is_some_and(|x| x as usize != index) {
+                continue;
+            }
+
+            let actual_piece_len = if index == total_pieces - 1 {
                 file_size - (index * piece_len)
             } else {
                 piece_len
             };
 
-            let mut begin = 0;
-
-            while begin < current_piece_len {
+            let mut piece_begin_at = 0;
+            while piece_begin_at < actual_piece_len {
                 // Note: Length will be `16 * 1024` except for the last blocks
-                let length = if begin + block_size <= current_piece_len {
+                let length = if piece_begin_at + block_size <= actual_piece_len {
                     block_size
                 } else {
-                    current_piece_len - begin
+                    actual_piece_len - piece_begin_at
                 };
 
-                let mut msg: Vec<u8> = Vec::with_capacity(17);
-                // Message length: 13 bytes of Payload (index, begin, length) + 1 bytes of message Id
-                msg.extend(&13u32.to_be_bytes());
-                // Message Id: 6 for `request` message type.
-                msg.push(6);
-                // Payload: (index, begin, length) each as 4 bytes.
-                msg.extend(&(index as u32).to_be_bytes());
-                msg.extend(&(begin as u32).to_be_bytes());
-                msg.extend(&(length as u32).to_be_bytes());
-
-                if let Err(e) = stream.write_all(&msg).await {
-                    eprintln!("Failed to send request: {:?}", e);
-                    break;
-                }
-
+                // To send the `request` block to the peer.
+                let _ = self
+                    .send_block(stream, index as u32, piece_begin_at as u32, length as u32)
+                    .await;
                 let piece = self.wait_pieces(stream).await;
 
-                // Sending This piece data to the receiver.
-                let _tx: Sender<Vec<u8>> = tx.clone();
-                let _ = tokio::spawn(async move {
-                    match piece {
-                        Self::Piece {
-                            index,
-                            begin,
-                            block,
-                        } => {
-                            let _ = _tx.send(block).await;
+                match piece {
+                    Self::Piece {
+                        index,
+                        begin: _,
+                        block,
+                    } => {
+                        // It check for integrity of the blocks received
+                        mapped_block.entry(index).or_default().push(block);
+                        received_block_size.insert(index, piece_begin_at);
+
+                        if received_block_size.get(&index).unwrap() + length >= actual_piece_len {
+                            let piece_blocks = mapped_block.get(&index).unwrap().concat();
+
+                            mapped_block.remove(&index);
+
+                            if self.check_integrity(&piece_blocks, pieces, index as usize) {
+                                let mut file = File::options()
+                                    .create(true)
+                                    .write(true)
+                                    .open(&file_path)
+                                    .await
+                                    .unwrap();
+
+                                if let Err(e) = file.write_all(&piece_blocks).await {
+                                    eprintln!("Failed to write piece to file: {:?}", e);
+                                }
+                            }
                         }
+                    }
+                    _ => {
+                        eprintln!("Didn't match the type 'Message'.")
+                    }
+                };
 
-                        _ => {
-                            eprintln!("Didn't match the type 'Message'.")
-                        }
-                    };
-                })
-                .await;
-
-                println!(
-                    "Sent request for piece {} begin {} length {}",
-                    index, begin, length
-                );
-
-                begin += length;
+                piece_begin_at += length;
             }
         }
     }
 
-    pub async fn request_msg(&self, piece_len: usize, file_size: usize, stream: &mut TcpStream) {
-        // Channel to receive blocks from the request logic
-        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(16_384);
-        let total_value = Arc::new(Mutex::new(Vec::new()));
+    #[inline]
+    fn check_integrity(&self, block: &Vec<u8>, pieces: &Vec<String>, index: usize) -> bool {
+        let val = sha1_hash(&block).to_vec();
+        let hex_val: String = val.iter().map(|b| format!("{:02x}", b)).collect();
 
-        // Task to collect all received blocks into `total_value`
-        let total_value_clone = Arc::clone(&total_value);
-        let collector_handle = tokio::spawn(async move {
-            while let Some(block) = rx.recv().await {
-                let mut tot = total_value_clone.lock().await;
-                tot.extend_from_slice(&block);
-            }
-        });
-
-        // Start the request logic
-        {
-            self.request(stream, piece_len, file_size, tx).await;
+        if pieces[index as usize] != hex_val {
+            eprintln!(
+                "Integrity error: Could not find the piece_hashes that matches provided piece."
+            );
+            return false;
         }
-
-        let val = sha1_hash(&total_value.lock().await).to_vec();
-        println!("val is  {:?}", val);
-
-        // Wait for the collector task to complete
-        // This will finish only if the `request` method finishes and `tx` is dropped
-        let _ = collector_handle.await;
+        true
     }
 
     /// This waits for pieces message from the peers right after sending `request` message
     pub async fn wait_pieces(&self, stream: &mut TcpStream) -> Messages {
-        Self::start_exchange(stream).await.unwrap()
+        match Self::start_exchange(stream).await {
+            Ok(msg) => msg,
+            Err(e) => {
+                eprintln!("Failed to receive message: {:?}", e);
+                return Messages::Unknown(0, vec![]);
+            }
+        }
     }
 }
