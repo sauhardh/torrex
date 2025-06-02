@@ -6,4 +6,4 @@
 
 - [ ] Add support for DHT
 
-- [ ] Heavy refactor needed for connection module
+- [x] Heavy refactor needed for connection module

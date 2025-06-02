@@ -4,6 +4,7 @@ use tokio::io::AsyncSeekExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -26,16 +27,16 @@ pub struct BitFieldInfo {
 }
 
 #[derive(Debug)]
-pub struct Connection {
+pub struct PeerConnection {
     stream: Arc<Mutex<TcpStream>>,
     pub bitfield_info: BitFieldInfo,
     pub message: Arc<Mutex<Messages>>,
     allocated_pieces: HashSet<u32>,
     block_storage: Arc<Mutex<HashMap<u32, BTreeMap<u32, Vec<u8>>>>>,
-    block_book: Arc<Mutex<HashMap<u32, usize>>>,
+    block_book: Arc<RwLock<HashMap<u32, usize>>>,
 }
 
-impl Connection {
+impl PeerConnection {
     pub async fn init(addr: String) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let addr = addr.parse::<SocketAddrV4>()?;
         let stream = TcpStream::connect(addr).await?;
@@ -52,7 +53,7 @@ impl Connection {
             message,
             allocated_pieces: HashSet::new(),
             block_storage: Arc::new(Mutex::new(HashMap::new())),
-            block_book: Arc::new(Mutex::new(HashMap::new())),
+            block_book: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -87,7 +88,7 @@ impl Connection {
 
     pub async fn is_piece_complete(&self, index: u32, total_length: usize) -> bool {
         let output = {
-            let book = self.block_book.lock().await;
+            let book = self.block_book.read().await;
             book.get(&index).copied()
         };
 
@@ -164,9 +165,8 @@ impl Connection {
                         }
 
                         {
-                            let mut block_book = self.block_book.lock().await;
-                            block_book
-                                .entry(index)
+                            let mut book = self.block_book.write().await;
+                            book.entry(index)
                                 .and_modify(|l| *l += block.len())
                                 .or_insert(block.len());
                         }
@@ -175,7 +175,7 @@ impl Connection {
 
                         // Check if piece is complete
                         let is_complete = {
-                            let book = self.block_book.lock().await;
+                            let book = self.block_book.read().await;
                             *book.get(&index).unwrap_or(&0) >= actual_piece_length
                         };
 
@@ -322,14 +322,14 @@ impl Connection {
     }
 }
 
-pub struct DownloadManager {
-    pub connections: Arc<Mutex<Vec<Connection>>>,
+pub struct SwarmManager {
+    pub connections: Arc<Mutex<Vec<PeerConnection>>>,
     self_peer_id: String,
     destination: String,
     peer_pieces: HashMap<String, Vec<u32>>,
 }
 
-impl DownloadManager {
+impl SwarmManager {
     pub fn init() -> Self {
         Self {
             connections: Arc::new(Mutex::new(Vec::new())),
@@ -360,7 +360,7 @@ impl DownloadManager {
             let connections = Arc::clone(&self.connections);
 
             tasks.push(tokio::spawn(async move {
-                if let Ok(mut conn) = Connection::init(addr).await {
+                if let Ok(mut conn) = PeerConnection::init(addr).await {
                     match conn.init_handshaking(info_hash, peer_id).await {
                         Ok(remote_peer_id) => {
                             conn.receive_bitfield(remote_peer_id).await;
@@ -598,7 +598,7 @@ mod test_connection {
             .response
             .peers_ip();
 
-        let mut dm = DownloadManager::init();
+        let mut dm = SwarmManager::init();
 
         dm.connect_and_exchange_bitfield(
             ip_addr,
@@ -607,7 +607,7 @@ mod test_connection {
         )
         .await;
 
-        dm.destination("/tmp/test.txt".to_string())
+        dm.destination("/tmp/testing.txt".to_string())
             .final_peer_msg(
                 _length.unwrap().clone(),
                 &meta.info.pieces_hashes(),
