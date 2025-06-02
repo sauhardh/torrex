@@ -1,5 +1,4 @@
-// This mod generate random string of length 20 for peer_id
-
+/// This mod generate random string of length 20 for peer_id
 use rand;
 use rand::Rng;
 use rand::distr::Alphabetic; // 0.8
