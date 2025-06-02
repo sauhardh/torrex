@@ -1,19 +1,13 @@
-use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use tokio::io::AsyncSeekExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tokio::sync::mpsc;
 use tokio::time::timeout;
 
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use std::vec;
-
-use crate::cryptography::sha1_hash;
 
 /// Messages to send to a peer. It's to exchange multiple peer messages to download the file.
 #[derive(Debug, PartialEq, Clone)]
@@ -230,8 +224,6 @@ impl Messages {
         msg.extend(&(index).to_be_bytes());
         msg.extend(&(begin as u32).to_be_bytes());
         msg.extend(&(length as u32).to_be_bytes());
-
-        println!("msg for index {index} of length {length} is {:?}", msg);
 
         let mut stream = self.stream.lock().await;
         stream.write_all(&msg).await?;

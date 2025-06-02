@@ -1,13 +1,13 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Default, Debug)]
-struct MagnetLink {
+pub struct MagnetLink {
     /// urn:btih: followed by the 40-char hex-encoded info hash
-    xt: String,
+    pub xt: String,
     /// The name of the file to be downloaded (example: magnet1.gif)
-    dn: Option<String>,
+    pub dn: Option<String>,
     /// The tracker URL (example: http://bittorrent-tracker-torrex.io/blog)
-    tr: Option<String>,
+    pub tr: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

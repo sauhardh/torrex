@@ -73,10 +73,6 @@ impl Connection {
         Ok(remote_peer_id)
     }
 
-    // if let Some(bitfield_payload) = message.wait_bitfield().await {
-    //     self.bitfield_info.peer_id = peer_id;
-    //     self.bitfield_info.present_pieces = bitfield_payload.into();
-    // }
     pub async fn receive_bitfield(&mut self, peer_id: String) {
         let output = {
             let mut message = self.message.lock().await;
@@ -103,106 +99,22 @@ impl Connection {
         false
     }
 
-    pub async fn request_piece_block(&mut self, index: u32, piece_length: usize) {
-        let current_offset = {
-            let book = self.block_book.lock().await;
-            book.get(&index).copied().unwrap_or(0)
-        };
-
-        let block_length = if current_offset + BLOCK_SIZE as usize <= piece_length {
-            BLOCK_SIZE as usize
-        } else {
-            piece_length - current_offset
-        };
-
-        println!(
-            "sending request to index: {index}, block_length {block_length} and current_offset {current_offset}"
-        );
-
-        let output = {
-            let message = self.message.lock().await;
-            message
-                .send_request(index, block_length, current_offset)
-                .await
-        };
-
-        if let Err(e) = output {
-            eprintln!(
-                "Error occured while sending request message to the peer for pieces of index: {index}. FurtherMore: {e}"
-            );
-        }
-    }
-
-    async fn receive_piece_block(&mut self) -> Option<()> {
-        let output = {
-            let mut message = self.message.lock().await;
-            message.wait_piece_block().await
-        };
-
-        if let Some(pb) = output {
-            match pb {
-                MessageType::Piece {
-                    index,
-                    begin,
-                    block,
-                } => {
-                    {
-                        let mut block_storage = self.block_storage.lock().await;
-                        block_storage
-                            .entry(index)
-                            .or_default()
-                            .insert(begin, block.clone());
-                    }
-
-                    {
-                        let mut block_book = self.block_book.lock().await;
-                        block_book
-                            .entry(index)
-                            .and_modify(|l| *l += block.len())
-                            .or_insert(block.len());
-                    }
-
-                    println!("blook_book {:?}\n\n", self.block_book);
-                    return Some(());
-                }
-
-                _ => {
-                    eprintln!("Expected only Piece type block. ");
-                }
-            }
-        }
-        None
-    }
-
-    pub async fn download_piece_blocks(
+    pub async fn request_piece_block(
         &mut self,
         index: u32,
-        pieces: &[String],
-        piece_length: usize,
-        destination: &String,
-        piece_len: u32,
-        flag: Option<String>,
+        actual_piece_length: usize,
+        total_blocks: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let total_blocks = (piece_length + BLOCK_SIZE as usize - 1) / BLOCK_SIZE as usize;
-        let message = Arc::clone(&self.message);
-        let storage = Arc::clone(&self.block_storage);
-        let book = Arc::clone(&self.block_book);
+        let message: Arc<Mutex<Messages>> = Arc::clone(&self.message);
 
-        println!("total_blocks {total_blocks}");
-
-        // Send all block requests immediately
         for block_idx in 0..total_blocks {
             let begin = block_idx * BLOCK_SIZE as usize;
 
-            let block_length = if begin + BLOCK_SIZE as usize <= piece_length {
+            let block_length = if begin + BLOCK_SIZE as usize <= actual_piece_length {
                 BLOCK_SIZE as usize
             } else {
-                piece_length - begin
+                actual_piece_length - begin
             };
-
-            println!(
-                "for sending request block_idx {block_idx} and begin {begin} and block_length {block_length}"
-            );
 
             if let Err(e) = message
                 .lock()
@@ -210,23 +122,33 @@ impl Connection {
                 .send_request(index, block_length, begin)
                 .await
             {
-                eprintln!("Failed to send block request: {e}");
-                return Err("Failed to send block request".into());
+                return Err(format!("Failed to send block request. FurtherMore:  {e}").into());
             }
         }
 
-        // Listen for responses
+        Ok(())
+    }
+
+    async fn receive_piece_block(
+        &mut self,
+        total_blocks: usize,
+        actual_piece_length: usize,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         let mut received_blocks = 0;
         let start_time = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(30);
 
         while received_blocks < total_blocks {
             if start_time.elapsed() > timeout {
-                eprintln!("Timeout waiting for piece {}", index);
                 return Err("Timeout waiting for piece".into());
             }
 
-            if let Some(pb) = message.lock().await.wait_piece_block().await {
+            let output = {
+                let mut message = self.message.lock().await;
+                message.wait_piece_block().await
+            };
+
+            if let Some(pb) = output {
                 match pb {
                     MessageType::Piece {
                         index,
@@ -234,7 +156,7 @@ impl Connection {
                         block,
                     } => {
                         {
-                            let mut block_storage = storage.lock().await;
+                            let mut block_storage = self.block_storage.lock().await;
                             block_storage
                                 .entry(index)
                                 .or_default()
@@ -242,7 +164,7 @@ impl Connection {
                         }
 
                         {
-                            let mut block_book = book.lock().await;
+                            let mut block_book = self.block_book.lock().await;
                             block_book
                                 .entry(index)
                                 .and_modify(|l| *l += block.len())
@@ -253,73 +175,12 @@ impl Connection {
 
                         // Check if piece is complete
                         let is_complete = {
-                            let block_book = book.lock().await;
-                            *block_book.get(&index).unwrap_or(&0) >= piece_length
+                            let book = self.block_book.lock().await;
+                            *book.get(&index).unwrap_or(&0) >= actual_piece_length
                         };
 
                         if is_complete {
-                            // Write the piece to file
-                            if let Some(blocks) = storage.lock().await.get(&index) {
-                                let mut data = Vec::with_capacity(piece_length);
-                                let mut sorted_blocks: Vec<_> = blocks.iter().collect();
-                                sorted_blocks.sort_by_key(|(begin, _)| *begin);
-
-                                for (_, block) in sorted_blocks {
-                                    data.extend(block);
-                                }
-
-                                // Verify piece length
-                                if data.len() != piece_length {
-                                    eprintln!(
-                                        "Piece {} has incorrect length: expected {}, got {}",
-                                        index,
-                                        piece_length,
-                                        data.len()
-                                    );
-                                    return Err("Piece length mismatch".into());
-                                }
-
-                                let val = sha1_hash(&data).to_vec();
-                                let hex_val: String =
-                                    val.iter().map(|b| format!("{:02x}", b)).collect();
-
-                                if pieces[index as usize] == hex_val {
-                                    if let Some(parent) =
-                                        std::path::Path::new(&destination).parent()
-                                    {
-                                        tokio::fs::create_dir_all(parent).await?;
-                                    }
-
-                                    let mut file = File::options()
-                                        .create(true)
-                                        .write(true)
-                                        .open(&destination)
-                                        .await?;
-
-                                    if !flag.is_some_and(|x| x == "download_piece") {
-                                        file.seek(std::io::SeekFrom::Start(
-                                            (index * piece_len) as u64,
-                                        ))
-                                        .await?;
-                                    }
-
-                                    file.write_all(&data).await?;
-                                    file.flush().await?;
-
-                                    println!(
-                                        "Successfully wrote piece {} to file (length: {})",
-                                        index,
-                                        data.len()
-                                    );
-                                    return Ok(());
-                                } else {
-                                    eprintln!(
-                                        "SHA-1 mismatch for piece {}: expected {}, got {}",
-                                        index, pieces[index as usize], hex_val
-                                    );
-                                    return Err("SHA-1 mismatch".into());
-                                }
-                            }
+                            return Ok(true);
                         }
                     }
                     _ => {
@@ -328,97 +189,139 @@ impl Connection {
                 }
             }
         }
-        Err("Failed to receive all blocks".into())
+
+        Ok(false)
     }
 
-    // pub async fn check_integrity(
-    //     &self,
-    //     index: u32,
-    //     pieces: &[String],
-    //     destination: &String,
-    //     piece_len: u32,
-    // ) -> Result<(), Box<dyn std::error::Error>> {
-    //     if let Some(blocks) = self.block_storage.lock().await.get(&index) {
-    //         let mut data = Vec::new();
+    pub async fn download_piece_blocks(
+        &mut self,
+        index: u32,
+        pieces: &[String],
+        actual_piece_length: usize,
+        destination: &String,
+        piece_len: u32,
+        flag: Option<String>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let total_blocks = (actual_piece_length + BLOCK_SIZE as usize - 1) / BLOCK_SIZE as usize;
 
-    //         // Sort blocks by begin offset to ensure correct order
-    //         let mut sorted_blocks: Vec<_> = blocks.iter().collect();
-    //         sorted_blocks.sort_by_key(|(begin, _)| *begin);
+        if let Err(e) = self
+            .request_piece_block(index, actual_piece_length, total_blocks)
+            .await
+        {
+            eprintln!(
+                "Error occured while requesting a piece block of index {index}. FurtherMore {e}"
+            );
+        };
 
-    //         for (_, block) in sorted_blocks {
-    //             data.extend(block);
-    //         }
+        // Listen for responses
+        if let Ok(is_complete) = self
+            .receive_piece_block(total_blocks, actual_piece_length)
+            .await
+        {
+            if is_complete {
+                if let Err(e) = self
+                    .check_integrity_and_save(
+                        index,
+                        pieces,
+                        destination,
+                        piece_len,
+                        actual_piece_length,
+                        &flag,
+                    )
+                    .await
+                {
+                    eprintln!(
+                        "Error occured while calling for integrity checking and saving to file. FurtherMore: {e}"
+                    )
+                };
+            }
+        }
 
-    //         let val = sha1_hash(&data).to_vec();
-    //         let hex_val: String = val.iter().map(|b| format!("{:02x}", b)).collect();
+        Ok(())
+    }
 
-    //         if pieces[index as usize] == hex_val {
-    //             // Create directory if it doesn't exist
-    //             if let Some(parent) = std::path::Path::new(destination).parent() {
-    //                 tokio::fs::create_dir_all(parent).await?;
-    //             }
+    pub async fn check_integrity_and_save(
+        &self,
+        index: u32,
+        pieces: &[String],
+        destination: &String,
+        piece_len: u32,
+        actual_piece_length: usize,
+        flag: &Option<String>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let storage = self.block_storage.lock().await;
+        if let Some(blocks) = storage.get(&index) {
+            let mut data = Vec::with_capacity(actual_piece_length);
 
-    //             // Open file with append mode
-    //             let mut file = File::options()
-    //                 .create(true)
-    //                 .append(true) // Use append instead of write
-    //                 .open(destination)
-    //                 .await?;
+            let mut sorted_blocks: Vec<_> = blocks.iter().collect();
+            sorted_blocks.sort_by_key(|(begin, _)| *begin);
 
-    //             // Seek to the correct position
-    //             file.seek(std::io::SeekFrom::Start((index * piece_len) as u64))
-    //                 .await?;
+            for (_, block) in sorted_blocks {
+                data.extend(block);
+            }
 
-    //             // Write the data
-    //             file.write_all(&data).await?;
-    //             file.flush().await?; // Ensure data is written to disk
+            // Verify piece length
+            if data.len() != actual_piece_length {
+                eprintln!(
+                    "Piece {} has incorrect length: expected {}, got {}",
+                    index,
+                    actual_piece_length,
+                    data.len()
+                );
+                return Err("Piece length mismatch".into());
+            }
 
-    //             println!("Successfully wrote piece {} to file", index);
-    //             return Ok(());
-    //         }
-    //     }
+            let val = sha1_hash(&data).to_vec();
+            let hex_val: String = val.iter().map(|b| format!("{:02x}", b)).collect();
 
-    //     Err("Integrity check failed".into())
-    // }
+            if pieces[index as usize] == hex_val {
+                // Function to save data to a file
+                if let Err(e) = self
+                    .save_to_file(destination, flag, index, piece_len, &data)
+                    .await
+                {
+                    eprintln!("Failed to save to file for index {index}. FurtherMore: {e}");
+                };
 
-    // pub async fn save_to_file(
-    //     &self,
-    //     dest: &String,
-    //     index: u32,
-    //     piece_len: u32,
-    // ) -> Result<(), Box<dyn std::error::Error>> {
-    //     let mut file = File::options().create(true).append(true).open(dest).await?;
-    //     if let Some(b) = self.block_storage.lock().await.get(&index) {
-    //         file.seek(std::io::SeekFrom::Start((index * piece_len) as u64))
-    //             .await?;
+                return Ok(());
+            } else {
+                return Err("SHA-1 mismatch".into());
+            }
+        } else {
+            return Err("Failed to find any buffer for particular index".into());
+        }
+    }
 
-    //         for block in b.values() {
-    //             file.write_all(&block).await?;
-    //         }
-    //     }
+    pub async fn save_to_file(
+        &self,
+        destination: &String,
+        flag: &Option<String>,
+        index: u32,
+        piece_len: u32,
+        data: &Vec<u8>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(parent) = std::path::Path::new(&destination).parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
 
-    //     Ok(())
-    // }
+        let mut file = File::options()
+            .create(true)
+            .write(true)
+            .open(&destination)
+            .await?;
 
-    pub async fn flush(&mut self) {
-        let mut book = self.block_book.lock().await;
-        let mut block = self.block_storage.lock().await;
+        if !flag.clone().is_some_and(|x| x == "download_piece") {
+            file.seek(std::io::SeekFrom::Start((index * piece_len) as u64))
+                .await?;
+        }
 
-        book.clear();
-        block.clear();
-        self.allocated_pieces.clear();
+        file.write_all(&data).await?;
+        file.flush().await?;
 
-        let stream = self.stream.clone();
-        tokio::spawn(async move {
-            let mut stream = stream.lock().await;
-            if let Err(e) = stream.shutdown().await {
-                eprintln!("Failed to shutdown TCP stream. FurtherMore: {e}")
-            };
-        });
+        Ok(())
     }
 }
 
-/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 pub struct DownloadManager {
     pub connections: Arc<Mutex<Vec<Connection>>>,
     self_peer_id: String,
@@ -483,9 +386,9 @@ impl DownloadManager {
     async fn peer_pieces_selection(&mut self) {
         let mut connections = self.connections.lock().await;
 
-        // /*
-        // Step 1: Number of peers available for particular piece
-        // */
+        /*
+        Number of peers available for particular piece
+        */
         let mut pieces_peer: HashMap<u32, Vec<String>> = HashMap::new();
         for conn in connections.deref_mut() {
             for piece_idx in &conn.bitfield_info.present_pieces {
@@ -496,14 +399,14 @@ impl DownloadManager {
             }
         }
 
-        // /*
-        // Step 2: Find the rarest pieces.
-        // */
+        /*
+        Find the rarest pieces.
+        */
         let mut rarest_pieces: Vec<(u32, Vec<String>)> = pieces_peer.into_iter().collect();
         rarest_pieces.sort_by_key(|(_, peers)| peers.len());
 
         /*
-        Step 3: Number of Pieces per peer.
+        Number of Pieces per peer.
         Based on random number.
         */
         let mut assigned_pieces: HashSet<u32> = HashSet::new();
@@ -605,25 +508,24 @@ impl DownloadManager {
                             unchoked_peers.lock().await.insert(peer.clone());
                         }
 
-                        let piece_length = if index as usize == total_pieces - 1 {
+                        let actual_piece_length = if index as usize == total_pieces - 1 {
                             file_size - (index as usize * piece_len)
                         } else {
                             piece_len
                         };
 
-                        println!("Download piece blocks with {piece_length}, {file_size} {index}");
                         if let Err(e) = conn
                             .download_piece_blocks(
                                 index,
                                 &pieces,
-                                piece_length,
+                                actual_piece_length,
                                 &destination,
                                 piece_len as u32,
                                 Some("download".to_string()),
                             )
                             .await
                         {
-                            eprintln!("Error on downloading piece {e}");
+                            eprintln!("Error on downloading piece. FurtherMore:  {e}");
                         };
 
                         {
