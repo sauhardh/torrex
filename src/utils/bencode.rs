@@ -1,3 +1,4 @@
+use hex;
 use serde_json::Value;
 
 use std::collections::HashMap;
@@ -15,7 +16,7 @@ impl Bencode {
     ///
     /// Example: `5:helloworld -> hello`
     #[inline]
-    fn decode_string(self, encoded_value: &[u8]) -> (Value, &[u8]) {
+    fn decode_string<'a>(&'a self, encoded_value: &'a [u8]) -> (Value, &'a [u8]) {
         let col_idx = encoded_value.iter().position(|byte| byte == &b':').unwrap();
 
         let len = from_utf8(&encoded_value[..col_idx])
@@ -56,7 +57,7 @@ impl Bencode {
     ///
     /// NOTE: all integers with leading 0 is invalid i.e. `i-0e` or `i05e`. BUT `i0e` is valid as 0 is an integer itself.
     #[inline]
-    fn decode_integer(self, encoded_value: &[u8]) -> (Value, &[u8]) {
+    fn decode_integer<'a>(&'a self, encoded_value: &'a [u8]) -> (Value, &'a [u8]) {
         let end_idx = encoded_value.iter().position(|byte| byte == &b'e').unwrap();
 
         let n = from_utf8(&encoded_value[1..end_idx])
@@ -68,7 +69,7 @@ impl Bencode {
     }
 
     /// This acts as hub for decoding values of several  datatypes like, string, integer, list, dictionary.
-    pub fn decoder(self, encoded_value: &[u8]) -> (Value, &[u8]) {
+    pub fn decoder<'a>(&'a self, encoded_value: &'a [u8]) -> (Value, &'a [u8]) {
         match encoded_value[0] {
             // String
             b'0'..=b'9' => {
@@ -90,8 +91,8 @@ impl Bencode {
                 let mut list = Vec::new();
 
                 while !rest.is_empty() && rest[0] != b'e' {
-                    let (value, r) = self.clone().decoder(rest);
-                    list.push(value.clone());
+                    let (value, r) = self.decoder(rest);
+                    list.push(value);
                     rest = r;
                 }
 
@@ -107,15 +108,15 @@ impl Bencode {
 
                 let (mut if_key, mut key) = (false, None);
 
-                while rest.to_vec().len() > 2 {
-                    let (value, r) = self.clone().decoder(rest);
+                while !rest.is_empty() && rest[0] != b'e' {
+                    let (value, r) = self.decoder(rest);
 
                     if if_key {
                         hash.insert(key.clone().unwrap(), value);
                         if_key = false;
                     } else {
                         if let serde_json::Value::String(s) = &value {
-                            key = Some(s.clone());
+                            key = Some(s.to_string());
                             if_key = true;
                         };
                     }
@@ -139,7 +140,7 @@ impl Bencode {
 }
 
 #[cfg(test)]
-mod bytes_bencode_testing {
+mod test_bencode {
 
     use super::*;
 
@@ -160,7 +161,9 @@ mod bytes_bencode_testing {
     #[test]
     fn test_decoder() {
         let bencoding = Bencode::new();
-        let output = bencoding.decoder("d4:spaml1:a1:bee".as_bytes());
+        let encoded_value = "d8:intervali60e12:min intervali60e5:peersld7:peer id20:-RN0.0.0-�\u{1c}��ۆ�jʚ!2:ip13:167.71.143.544:porti51501eed7:peer id20:-RN0.0.0-\u{12}\u{8}F�\u{10}% �%��2:ip14:139.59.184.2554:porti51510eed2:ip14:165.232.35.1394:porti51413e7:peer id20:-RN0.0.0-2��Qᓮ��ɍee8:completei3e10:incompletei1ee";
+        println!("Encoded value: {encoded_value}");
+        let output = bencoding.decoder(encoded_value.as_bytes());
         println!("{:?}", output.0);
     }
 }

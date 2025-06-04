@@ -94,7 +94,7 @@ impl TorrentFile {
     pub fn parse_metafile(&self, encoded_value: &Vec<u8>) -> TorrentFile {
         let bencoded = Bencode::new();
 
-        let output = bencoded.clone().decoder(&encoded_value);
+        let output = bencoded.decoder(&encoded_value);
         let finally: TorrentFile = serde_json::from_value(output.0).unwrap();
 
         return finally;

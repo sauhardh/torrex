@@ -6,17 +6,16 @@ pub struct MagnetLink {
     pub xt: String,
     /// The name of the file to be downloaded (example: magnet1.gif)
     pub dn: Option<String>,
-    /// The tracker URL (example: http://bittorrent-tracker-torrex.io/blog)
+    /// The tracker URL (example: http://bittorrent-tracker-torrex.io/announce)
     pub tr: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 /// To parse the magnet link
 /// Example of link, v1: magnet:?xt=urn:btih:<info-hash>&dn=<name>&tr=<tracker-url>&x.pe=<peer-address>
-
 pub struct Parser {
-    magnet_link: MagnetLink,
-    link: String,
+    pub magnet_link: MagnetLink,
+    pub link: String,
 }
 
 impl Parser {
@@ -39,6 +38,7 @@ impl Parser {
         if !self.verify_magnet() {
             eprintln!("Provided is not the magnet link.");
         }
+
         let query = self.link.trim_start_matches("magnet:?");
         for part in query.split('&') {
             if let Some((key, val)) = part.split_once('=') {
@@ -65,6 +65,6 @@ mod parser {
     #[test]
     fn parse() {
         let link = "magnet:?xt=urn:btih:ad42ce8109f54c99613ce38f9b4d87e70f24a165&dn=magnet1.gif&tr=http%3A%2F%2Fbittorrent-test-tracker.codecrafters.io%2Fannounce";
-        Parser::new(link.to_string()).parse();
+        let parser = Parser::new(link.to_string()).parse();
     }
 }

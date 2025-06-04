@@ -1,7 +1,9 @@
+use std::io::Read;
+
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 #[repr(C)]
 pub struct Handshake {
     /// Length of Protocol string `Bittorrent Protocol`, which is of length `19`, 1 Byte.
@@ -9,7 +11,7 @@ pub struct Handshake {
     /// the string `BitTorrent protocol` (19 bytes)
     string: String,
     /// 8 reserved bytes which are all initialized to 0 (8 bytes)
-    reserved: Vec<u8>,
+    pub reserved: Vec<u8>,
     /// sh1 info hash (20 bytes)
     info_hash: Vec<u8>,
     /// peer id, generate random 20 bytes value
@@ -18,13 +20,13 @@ pub struct Handshake {
 
 impl Handshake {
     /// Initialize the struct with parameter required for handshaking
-    pub fn init(info_hash: Vec<u8>, peer_id: Vec<u8>) -> Self {
+    pub fn init(info_hash: Vec<u8>, self_peer_id: Vec<u8>) -> Self {
         Self {
             length: 19,
             string: "BitTorrent protocol".to_string(),
             reserved: vec![0; 8],
             info_hash,
-            peer_id,
+            peer_id: self_peer_id,
         }
     }
 
@@ -45,6 +47,15 @@ impl Handshake {
         buffer
     }
 
+    /// This is the extension for magnet link support.
+    ///
+    /// Set 20th bit from right(counting starts at 0) to 1, out of 64 reserved bit(8 bytes).
+    pub fn reserve_magnetlink(&mut self) -> &Self {
+        self.reserved[2] |= 1 << 4;
+
+        self
+    }
+
     pub async fn handshake_reply(
         &self,
         stream: &mut TcpStream,
@@ -56,7 +67,7 @@ impl Handshake {
     }
 
     #[inline]
-    pub async fn receive_handshake(
+    async fn receive_handshake(
         &self,
         stream: &mut TcpStream,
     ) -> Result<[u8; 68], Box<dyn std::error::Error + Send + Sync>> {
@@ -67,7 +78,7 @@ impl Handshake {
     }
 
     #[inline]
-    pub fn parse_handshake(&self, buf: &[u8]) -> Handshake {
+    fn parse_handshake(&self, buf: &[u8]) -> Handshake {
         if buf.len() != 68 {
             eprintln!(
                 "Could not parse handshake buffer. Got incorrect buffer length of {}",
@@ -80,14 +91,12 @@ impl Handshake {
         let info_hash = buf[28..48].to_vec();
         let peer_id = buf[48..].to_vec();
 
-        let reply = Handshake {
+        Handshake {
             length,
             string,
             reserved,
             info_hash,
             peer_id,
-        };
-
-        reply
+        }
     }
 }

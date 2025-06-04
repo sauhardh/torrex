@@ -62,8 +62,9 @@ impl PeerConnection {
         info_hash: Vec<u8>,
         peer_id: Vec<u8>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let handshake = Handshake::init(info_hash, peer_id);
-        let buf: Vec<u8> = handshake.to_bytes();
+        let mut handshake = Handshake::init(info_hash, peer_id);
+        // Support for magnet link extension
+        let buf: Vec<u8> = handshake.reserve_magnetlink().to_bytes();
 
         let mut stream = self.stream.lock().await;
         stream.write_all(&buf).await?;
@@ -86,21 +87,7 @@ impl PeerConnection {
         };
     }
 
-    pub async fn is_piece_complete(&self, index: u32, total_length: usize) -> bool {
-        let output = {
-            let book = self.block_book.read().await;
-            book.get(&index).copied()
-        };
-
-        if let Some(current_length) = output {
-            if current_length >= total_length {
-                return true;
-            }
-        }
-        false
-    }
-
-    pub async fn request_piece_block(
+    async fn request_piece_block(
         &mut self,
         index: u32,
         actual_piece_length: usize,
@@ -130,6 +117,7 @@ impl PeerConnection {
         Ok(())
     }
 
+    #[inline]
     async fn receive_piece_block(
         &mut self,
         total_blocks: usize,
@@ -240,7 +228,8 @@ impl PeerConnection {
         Ok(())
     }
 
-    pub async fn check_integrity_and_save(
+    #[inline]
+    async fn check_integrity_and_save(
         &self,
         index: u32,
         pieces: &[String],
@@ -260,21 +249,25 @@ impl PeerConnection {
                 data.extend(block);
             }
 
+            // for (_, block) in blocks {
+            //     data.extend(block);
+            // }
+
             // Verify piece length
             if data.len() != actual_piece_length {
-                eprintln!(
+                return Err(format!(
                     "Piece {} has incorrect length: expected {}, got {}",
                     index,
                     actual_piece_length,
                     data.len()
-                );
-                return Err("Piece length mismatch".into());
+                )
+                .into());
             }
 
             let val = sha1_hash(&data).to_vec();
-            let hex_val: String = val.iter().map(|b| format!("{:02x}", b)).collect();
-
-            if pieces[index as usize] == hex_val {
+            if pieces[index as usize]
+                == val.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+            {
                 // Function to save data to a file
                 if let Err(e) = self
                     .save_to_file(destination, flag, index, piece_len, &data)
@@ -356,12 +349,12 @@ impl SwarmManager {
 
         for addr in ip_addr {
             let info_hash = info_hash.clone();
-            let peer_id = peer_id.clone();
+            let self_peer_id = peer_id.clone();
             let connections = Arc::clone(&self.connections);
 
             tasks.push(tokio::spawn(async move {
                 if let Ok(mut conn) = PeerConnection::init(addr).await {
-                    match conn.init_handshaking(info_hash, peer_id).await {
+                    match conn.init_handshaking(info_hash, self_peer_id).await {
                         Ok(remote_peer_id) => {
                             conn.receive_bitfield(remote_peer_id).await;
 
@@ -383,6 +376,7 @@ impl SwarmManager {
         }
     }
 
+    #[inline]
     async fn peer_pieces_selection(&mut self) {
         let mut connections = self.connections.lock().await;
 
@@ -449,12 +443,13 @@ impl SwarmManager {
         //<< For Passing through asynchronous task.
         let completed_pieces: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
         let unchoked_peers: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-        let destination = Arc::new(self.destination.clone());
-        let pieces = Arc::new(pieces.clone());
-        let connections = self.connections.clone();
         let downloading_pieces: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
 
         let mut tasks = Vec::new();
+
+        let destination = Arc::new(self.destination.clone());
+        let pieces = Arc::new(pieces.clone());
+        let connections = self.connections.clone();
         //>>
 
         for (peer, indexes) in &self.peer_pieces {
@@ -463,7 +458,6 @@ impl SwarmManager {
             let completed_pieces = Arc::clone(&completed_pieces);
             let unchoked_peers = Arc::clone(&unchoked_peers);
             let downloading_pieces = Arc::clone(&downloading_pieces);
-
             let pieces = Arc::clone(&pieces);
 
             let indexes = indexes.clone();
@@ -528,17 +522,14 @@ impl SwarmManager {
                             eprintln!("Error on downloading piece. FurtherMore:  {e}");
                         };
 
-                        {
-                            // To Mark pieces of particular index as completed
-                            let mut completed = completed_pieces.lock().await;
-                            completed.insert(index);
-                        }
+                        // To Mark pieces of particular index as completed
+                        let mut completed = completed_pieces.lock().await;
+                        completed.insert(index);
+                        drop(completed);
 
-                        {
-                            // It's no longer downloading as it should have already downloaded by now.
-                            let mut downloading = downloading_pieces.lock().await;
-                            downloading.remove(&index);
-                        }
+                        // It's no longer downloading as it should have already downloaded by now.
+                        let mut downloading = downloading_pieces.lock().await;
+                        downloading.remove(&index);
                     }
                 }
             }));
