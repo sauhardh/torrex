@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 
 use std::borrow::Cow;
 
-use crate::{bencode::Bencode, random};
+use crate::{
+    bencode::Bencode, extension::magnet_link::extended_handshake::MagnetResponseParams, random,
+};
 
 #[derive(Debug, Serialize)]
 pub enum Event {
@@ -114,7 +116,8 @@ pub struct Peers {
     /// URL to request tracker for information.
     announce_url: String,
     pub request: RequestParams,
-    pub response: ResponseParams,
+    pub response: Option<ResponseParams>,
+    pub magnet_response: Option<MagnetResponseParams>,
 }
 
 impl Peers {
@@ -122,6 +125,8 @@ impl Peers {
         Self::default()
     }
 
+    /// Flag = "response" if using .torrent file.
+    /// Flag = "magnet" will mark it as magnet link request.
     pub async fn request_tracker(&mut self, params: &RequestParams) -> &Self {
         let client = reqwest::Client::new();
         let mut url = reqwest::Url::parse(&self.announce_url).unwrap();
@@ -149,8 +154,9 @@ impl Peers {
 
         let res_body = client.get(url).send().await.unwrap().bytes().await.unwrap();
 
-        self.response =
-            serde_json::from_value::<ResponseParams>(Bencode::new().decoder(&res_body).0).unwrap();
+        self.response = Some(
+            serde_json::from_value::<ResponseParams>(Bencode::new().decoder(&res_body).0).unwrap(),
+        );
 
         self
     }
@@ -201,6 +207,8 @@ mod test_peers {
             .request_tracker(params)
             .await
             .response
+            .as_ref()
+            .unwrap()
             .peers_ip();
 
         println!("ip_adrr:{:?}", ip_addr);

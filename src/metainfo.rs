@@ -7,6 +7,7 @@ use std::fs;
 use std::io::Error;
 use std::io::ErrorKind::InvalidInput;
 use std::path::Path;
+use std::str::from_utf8;
 
 use crate::bencode::Bencode;
 use crate::cryptography::sha1_hash;
@@ -95,9 +96,10 @@ impl TorrentFile {
         let bencoded = Bencode::new();
 
         let output = bencoded.decoder(&encoded_value);
-        let finally: TorrentFile = serde_json::from_value(output.0).unwrap();
+        println!("Output {:#?}", output.0);
+        let file: TorrentFile = serde_json::from_value(output.0).unwrap();
 
-        return finally;
+        return file;
     }
 
     pub fn info_hash<'a>(&self, encoded_value: &'a [u8]) -> Option<GenericArray<u8, U20>> {

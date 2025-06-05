@@ -3,28 +3,32 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_bencode::value::Value;
 
-use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fmt::Write;
+use std::{borrow::Cow, collections::HashMap};
 
 use crate::{
     bencode::Bencode, extension::magnet_link::Parser, handshake::Handshake, peers::ResponseParams,
     utils,
 };
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct MagnetPeerInfo {
     #[serde(rename = "peer id")]
-    peer_id: String,
-    ip: String,
-    port: u32,
+    pub peer_id: Vec<u8>,
+    pub ip: String,
+    pub port: u32,
+
+    #[serde(skip_serializing, skip_deserializing)]
+    pub peer_id_hex: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct MagnetResponseParams {
-    interval: u8,
+    pub interval: u8,
     #[serde(rename = "min interval")]
-    min_interval: u8,
-    peers: Vec<MagnetPeerInfo>,
+    pub min_interval: u8,
+    pub peers: Vec<MagnetPeerInfo>,
 }
 
 #[derive(Debug)]
@@ -32,6 +36,7 @@ pub struct ExtendedExchange<'a> {
     peers: Vec<String>,
     handshake: Handshake,
     pub parser: &'a mut Parser,
+    response: MagnetResponseParams,
 }
 
 impl<'a> ExtendedExchange<'a> {
@@ -40,10 +45,11 @@ impl<'a> ExtendedExchange<'a> {
             peers: Vec::new(),
             handshake: Handshake::default(),
             parser,
+            response: MagnetResponseParams::default(),
         }
     }
 
-    pub async fn get_peers(&mut self, peer_id: String) {
+    pub async fn get_peers(&mut self, peer_id: String) -> &mut Self {
         let client = reqwest::Client::new();
         let mut url = Url::parse(&self.parser.magnet_link.tr.as_mut().unwrap().to_string())
             .expect("Could not parse provided url");
@@ -64,35 +70,80 @@ impl<'a> ExtendedExchange<'a> {
             .append_pair("left", "999")
             .append_pair("downloaded", "0")
             .append_pair("uploaded", "0")
-            .append_pair("port", "6881");
+            .append_pair("port", "6881")
+            .append_pair("compact", "0");
 
-        if let Ok(res) = client.get(url).send().await {
-            if let Ok(buf) = res.bytes().await {
-                let response: MagnetResponseParams =
-                    serde_json::from_value(Bencode::new().decoder(&buf).0).unwrap();
-                println!("response {:?}", response);
-                //res: "d8:intervali60e12:min intervali60e5:peersld7:peer id20:-RN0.0.0-�\u{1c}��ۆ�jʚ!2:ip13:167.71.143.544:porti51501eed7:peer id20:-RN0.0.0-\u{12}\u{8}F�\u{10}% �%��2:ip14:139.59.184.2554:porti51510eed2:ip14:165.232.35.1394:porti51413e7:peer id20:-RN0.0.0-2��Qᓮ��ɍee8:completei3e10:incompletei1ee"
+        match client.get(url.clone()).send().await {
+            Ok(res) => {
+                if let Ok(buf) = res.bytes().await {
+                    let res = Bencode::new().decoder(&buf).0;
+                    self.response = serde_json::from_value::<MagnetResponseParams>(
+                        Bencode::new().decoder(&buf).0,
+                    )
+                    .unwrap();
+                }
             }
-        };
+            Err(e) => {
+                eprintln!("Failed to connect with provided url.. FurtherMore: {e}");
+            }
+        }
+
+        self
+    }
+
+    pub fn include_hex(&mut self) -> &mut Self {
+        for peer_info in &mut self.response.peers {
+            peer_info.peer_id_hex = Some(hex::encode(&peer_info.peer_id));
+        }
+
+        self
+    }
+
+    pub fn peers_ip(&mut self) -> Vec<String> {
+        let mut ips: Vec<String> = Vec::new();
+        for peer_info in &mut self.response.peers {
+            let addr = format!("{}:{}", peer_info.ip, peer_info.port);
+            ips.push(addr);
+        }
+
+        ips
     }
 }
 
 #[cfg(test)]
 mod test_extdhandshake {
 
+    use crate::connection::connection::PeerConnection;
+    use crate::connection::connection::SwarmManager;
+    use crate::connection::handshake;
     use crate::extension::magnet_link::Parser;
+    use crate::peers::Peers;
 
     use super::*;
     use utils::random;
 
     #[tokio::test]
     async fn test() {
-        let url: String = "magnet:?xt=urn:btih:ad42ce8109f54c99613ce38f9b4d87e70f24a165&dn=magnet1.gif&tr=http%3A%2F%2Fbittorrent-test-tracker.codecrafters.io%2Fannounce".to_string();
+        let url: String = "magnet:?xt=urn:btih:3f994a835e090238873498636b98a3e78d1c34ca&dn=magnet2.gif&tr=http%3A%2F%2Fbittorrent-test-tracker.codecrafters.io%2Fannounce".to_string();
         let mut parser = Parser::new(url.clone());
+        let parser = parser.parse();
 
-        let peer_id = random::generate_peerid();
-        ExtendedExchange::new(parser.parse())
-            .get_peers(peer_id)
-            .await;
+        let peer_id = random::generate_magnet_peerid();
+        let mut extd_exchange = ExtendedExchange::new(parser);
+        let extd_exchange = extd_exchange.get_peers(peer_id.clone()).await.include_hex();
+
+        let ips = extd_exchange.peers_ip();
+        println!("ips: {ips:?}");
+
+        println!("extd_exchange {:?}", extd_exchange);
+        let info_hash = &parser.magnet_link.xt;
+
+        let mut dm = SwarmManager::init();
+        dm.connect_and_exchange_bitfield(
+            ips,
+            info_hash.as_bytes().to_vec(),
+            peer_id.as_bytes().to_vec(),
+        )
+        .await;
     }
 }

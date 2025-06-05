@@ -63,15 +63,21 @@ impl PeerConnection {
         peer_id: Vec<u8>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let mut handshake = Handshake::init(info_hash, peer_id);
+        println!("handshake init finished");
         // Support for magnet link extension
         let buf: Vec<u8> = handshake.reserve_magnetlink().to_bytes();
+        println!("handshake finished");
 
         let mut stream = self.stream.lock().await;
+        println!("buf {buf:?}");
         stream.write_all(&buf).await?;
 
+        println!("init handshake reply ");
         let reply = handshake.handshake_reply(&mut stream).await?;
+        println!("handshake reply {reply:?}");
 
         let remote_peer_id = reply.peer_id.iter().map(|b| format!("{:02x}", b)).collect();
+        println!("handshake  {remote_peer_id:?}");
         Ok(remote_peer_id)
     }
 
@@ -315,6 +321,7 @@ impl PeerConnection {
     }
 }
 
+#[derive(Debug)]
 pub struct SwarmManager {
     pub connections: Arc<Mutex<Vec<PeerConnection>>>,
     self_peer_id: String,
@@ -347,15 +354,18 @@ impl SwarmManager {
         let mut tasks = vec![];
         self.self_peer_id = peer_id.iter().map(|b| format!("{:02x}", b)).collect();
 
+        println!("ip_addr: {:?}", ip_addr);
         for addr in ip_addr {
+            println!("FOR addr: {addr}");
             let info_hash = info_hash.clone();
             let self_peer_id = peer_id.clone();
             let connections = Arc::clone(&self.connections);
 
             tasks.push(tokio::spawn(async move {
-                if let Ok(mut conn) = PeerConnection::init(addr).await {
-                    match conn.init_handshaking(info_hash, self_peer_id).await {
+                match PeerConnection::init(addr).await {
+                    Ok(mut conn) => match conn.init_handshaking(info_hash, self_peer_id).await {
                         Ok(remote_peer_id) => {
+                            println!("remote_peer_id: {remote_peer_id}");
                             conn.receive_bitfield(remote_peer_id).await;
 
                             let mut connections = connections.lock().await;
@@ -363,11 +373,16 @@ impl SwarmManager {
                         }
 
                         Err(e) => {
-                            eprintln!("Error occured on initiating handshake {e:?} ",);
+                            eprintln!("Error occured on initiating handshake. FurtherMore {e:?} ",);
                             return;
                         }
+                    },
+
+                    // 165.232.41.73:51430
+                    Err(e) => {
+                        eprintln!("Failed to establish connection. FurtherMore {:?}", e);
                     }
-                };
+                }
             }));
         }
 
@@ -587,6 +602,8 @@ mod test_connection {
             .request_tracker(params)
             .await
             .response
+            .as_ref()
+            .unwrap()
             .peers_ip();
 
         let mut dm = SwarmManager::init();

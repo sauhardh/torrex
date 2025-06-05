@@ -29,7 +29,7 @@ impl Bencode {
 
         if end > encoded_value.len() {
             eprintln!(
-                "Index out of found. Incorrect field value. {:?}",
+                "Index out of bound. Incorrect field value. {:?}",
                 from_utf8(encoded_value).unwrap()
             );
         }
@@ -74,12 +74,14 @@ impl Bencode {
             // String
             b'0'..=b'9' => {
                 let (value, rest) = self.decode_string(encoded_value);
+
                 (value, rest)
             }
 
             // Integer
             b'i' => {
                 let (value, rest) = self.decode_integer(encoded_value);
+
                 (value, rest)
             }
 
@@ -92,6 +94,7 @@ impl Bencode {
 
                 while !rest.is_empty() && rest[0] != b'e' {
                     let (value, r) = self.decoder(rest);
+
                     list.push(value);
                     rest = r;
                 }
@@ -129,11 +132,14 @@ impl Bencode {
                 (value, rest)
             }
 
-            _ => {
-                panic!(
-                    "Unhandled encoded value. Could not parse: {:?}",
-                    encoded_value
-                );
+            _ if encoded_value[0].is_ascii_digit() => {
+                let (value, rest) = self.decode_string(encoded_value);
+
+                (value, rest)
+            }
+
+            other => {
+                panic!("Error occured on bencode parsing. Unhandled byte: {other}");
             }
         }
     }
@@ -161,9 +167,8 @@ mod test_bencode {
     #[test]
     fn test_decoder() {
         let bencoding = Bencode::new();
-        let encoded_value = "d8:intervali60e12:min intervali60e5:peersld7:peer id20:-RN0.0.0-�\u{1c}��ۆ�jʚ!2:ip13:167.71.143.544:porti51501eed7:peer id20:-RN0.0.0-\u{12}\u{8}F�\u{10}% �%��2:ip14:139.59.184.2554:porti51510eed2:ip14:165.232.35.1394:porti51413e7:peer id20:-RN0.0.0-2��Qᓮ��ɍee8:completei3e10:incompletei1ee";
-        println!("Encoded value: {encoded_value}");
+        let encoded_value = "d8:completei3e10:incompletei2e8:intervali60e12:min intervali60ee";
         let output = bencoding.decoder(encoded_value.as_bytes());
-        println!("{:?}", output.0);
+        println!("{:#?}", output.0);
     }
 }
