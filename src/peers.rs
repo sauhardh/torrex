@@ -3,11 +3,9 @@ use serde::{Deserialize, Serialize};
 
 use std::borrow::Cow;
 
-use crate::{
-    bencode::Bencode, extension::magnet_link::extended_handshake::MagnetResponseParams, random,
-};
+use crate::{bencode::Bencode, random};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub enum Event {
     Started,
     Completed,
@@ -16,7 +14,7 @@ pub enum Event {
     Empty,
 }
 
-#[derive(Default, Debug, Serialize)]
+#[derive(Default, Debug, Serialize, Clone)]
 pub struct RequestParams {
     /// **(required)**. URL encoded info hash of the torrent, 20 bytes long.
     pub info_hash: Vec<u8>,
@@ -74,21 +72,21 @@ impl RequestParams {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct ResponseParams {
     /// Number of peers who have finished downloading
-    complete: u32,
+    pub complete: u32,
     /// Number of peers who are still downloading (leechers)
-    incomplete: u32,
+    pub incomplete: u32,
     /// Minimum seconds to wait before recontacting the tracker.
     #[serde(rename = "min interval")]
-    min_interval: u32,
+    pub min_interval: u32,
     /// An integer, indicating how often your client should make a request to the tracker.
-    interval: u32,
+    pub interval: u32,
     /// Dictionary which contains list of peers that your client can connect to.
     /// Each peer is represented using 6 bytes.
     /// The first 4 bytes are the peer's IP address and the last 2 bytes are the peer's port number.
-    peers: Vec<u8>,
+    pub peers: Vec<u8>,
 }
 
 impl ResponseParams {
@@ -111,13 +109,12 @@ impl ResponseParams {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Peers {
     /// URL to request tracker for information.
     announce_url: String,
     pub request: RequestParams,
     pub response: Option<ResponseParams>,
-    pub magnet_response: Option<MagnetResponseParams>,
 }
 
 impl Peers {
@@ -153,6 +150,9 @@ impl Peers {
         }
 
         let res_body = client.get(url).send().await.unwrap().bytes().await.unwrap();
+
+        let res = Bencode::new().decoder(&res_body).0;
+        println!("res {:#?}", res);
 
         self.response = Some(
             serde_json::from_value::<ResponseParams>(Bencode::new().decoder(&res_body).0).unwrap(),

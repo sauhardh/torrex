@@ -51,7 +51,7 @@ impl Handshake {
     ///
     /// Set 20th bit from right(counting starts at 0) to 1, out of 64 reserved bit(8 bytes).
     pub fn reserve_magnetlink(&mut self) -> &Self {
-        self.reserved[2] |= 1 << 4;
+        self.reserved[5] |= 1 << 4;
 
         self
     }
@@ -60,9 +60,7 @@ impl Handshake {
         &self,
         stream: &mut TcpStream,
     ) -> Result<Handshake, Box<dyn std::error::Error + Send + Sync>> {
-        println!("handshake response init");
         let response = self.receive_handshake(stream).await?;
-        println!("handshake reply init");
         let reply = self.parse_handshake(&response);
 
         Ok(reply)
@@ -74,10 +72,7 @@ impl Handshake {
         stream: &mut TcpStream,
     ) -> Result<[u8; 68], Box<dyn std::error::Error + Send + Sync>> {
         let mut buf = [0u8; 68];
-        println!("starting to reading");
         stream.read_exact(&mut buf).await?;
-
-        println!("buf {buf:?}");
 
         Ok(buf)
     }
