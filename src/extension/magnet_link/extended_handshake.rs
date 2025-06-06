@@ -3,15 +3,17 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_bencode::value::Value;
 
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Write;
-use std::{borrow::Cow, collections::HashMap};
 
-use crate::peers::{Event, Peers, RequestParams};
-use crate::{
-    bencode::Bencode, extension::magnet_link::Parser, handshake::Handshake, peers::ResponseParams,
-    utils,
-};
+use crate::bencode::Bencode;
+use crate::connection::handshake::Handshake;
+use crate::extension::magnet_link::Parser;
+use crate::peers::Event;
+use crate::peers::Peers;
+use crate::peers::ResponseParams;
 
 #[derive(Debug)]
 pub struct ExtendedExchange<'a> {
@@ -80,6 +82,7 @@ impl<'a> ExtendedExchange<'a> {
 
 #[cfg(test)]
 mod test_extdhandshake {
+    use super::*;
 
     use crate::connection::connection::PeerConnection;
     use crate::connection::connection::SwarmManager;
@@ -87,8 +90,7 @@ mod test_extdhandshake {
     use crate::extension::magnet_link::Parser;
     use crate::peers::Peers;
 
-    use super::*;
-    use utils::random;
+    use crate::utils::random;
 
     #[tokio::test]
     async fn test() {

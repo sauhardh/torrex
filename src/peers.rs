@@ -151,9 +151,6 @@ impl Peers {
 
         let res_body = client.get(url).send().await.unwrap().bytes().await.unwrap();
 
-        let res = Bencode::new().decoder(&res_body).0;
-        println!("res {:#?}", res);
-
         self.response = Some(
             serde_json::from_value::<ResponseParams>(Bencode::new().decoder(&res_body).0).unwrap(),
         );
