@@ -7,7 +7,6 @@ use std::fs;
 use std::io::Error;
 use std::io::ErrorKind::InvalidInput;
 use std::path::Path;
-use std::str::from_utf8;
 
 use crate::bencode::Bencode;
 use crate::cryptography::sha1_hash;

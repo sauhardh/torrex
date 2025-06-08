@@ -1,19 +1,184 @@
-use hex;
-use reqwest::Url;
-use serde::{Deserialize, Serialize};
-use serde_bencode::value::Value;
+use serde::Deserialize;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
 
-use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::collections::HashSet;
-use std::fmt::Write;
+use std::vec;
+
+use serde::Serialize;
 
 use crate::bencode::Bencode;
-use crate::connection::handshake::Handshake;
 use crate::extension::magnet_link::Parser;
 use crate::peers::Event;
 use crate::peers::Peers;
-use crate::peers::ResponseParams;
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+struct ExtendedHandshakeM {
+    #[serde(default)]
+    ut_metadata: u8,
+    ut_pex: Option<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ExtendedHandshakeResponse {
+    #[serde(default)]
+    m: ExtendedHandshakeM,
+    metadata_size: Option<u32>,
+    reqq: Option<u32>,
+    #[serde(default)]
+    v: Option<String>,
+    #[serde(default, with = "serde_bytes")]
+    yourip: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct PayloadDict {
+    m: BTreeMap<String, u8>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct ExtendedHandshakePayload {
+    pub ext_message_id: u8,
+    dict: PayloadDict,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct ExtendedHandshake {
+    message_length: u32,
+    message_id: u8,
+    payload: ExtendedHandshakePayload,
+}
+
+impl ExtendedHandshake {
+    pub fn new() -> Self {
+        Self {
+            message_length: 0,
+            message_id: 20,
+            payload: ExtendedHandshakePayload {
+                ext_message_id: 0,
+                dict: PayloadDict { m: BTreeMap::new() },
+            },
+        }
+    }
+
+    pub fn insert_payload(&mut self, params: HashMap<String, u8>) -> &mut Self {
+        let m: BTreeMap<String, u8> = params.into_iter().collect();
+
+        let mut h = BTreeMap::new();
+        h.insert("m", m.clone());
+
+        let handshake = PayloadDict { m };
+        self.payload.dict = handshake;
+
+        self
+    }
+
+    pub fn insert_message_id(&mut self, id: u8) -> &Self {
+        self.message_id = id;
+
+        self
+    }
+
+    fn insert_message_len(&mut self, len: u32) -> &Self {
+        self.message_length = len;
+
+        self
+    }
+
+    pub fn to_bytes(&mut self) -> Option<Vec<u8>> {
+        // TODO: extend bencode.rs to support for encoding to bencode
+        if let Ok(value) = serde_bencode::to_bytes(&self.payload.dict) {
+            // self.insert_message_len(1 + value.len() as u32);
+
+            return Some(value);
+        }
+
+        None
+    }
+
+    pub fn to_full_message(&mut self) -> Vec<u8> {
+        /*
+        message_id is already set to 20 in `new()` associated function.
+        self.insert_message_id(20);
+        */
+
+        // Calling self.to_bytes() will also set message_len() to self;
+        let bencoded_dict = self.to_bytes().unwrap();
+        self.insert_message_len(1 + bencoded_dict.len() as u32 + 1);
+
+        let mut message = Vec::new();
+
+        // message length(4 bytes)
+        message.extend_from_slice(&self.message_length.to_be_bytes());
+
+        // message_id (1 byte)
+        message.push(self.message_id);
+
+        /*
+        Now For payload (Varaible size)
+        */
+
+        // extension message id of size 1 byte
+        message.push(self.payload.ext_message_id);
+        // bencoded dictionary of varaible size
+        message.extend_from_slice(&bencoded_dict);
+
+        message
+    }
+
+    pub async fn extd_receive_handshake(
+        &mut self,
+        stream: &mut TcpStream,
+    ) -> Result<ExtendedHandshakeResponse, Box<dyn std::error::Error>> {
+        let mut bitfield_buf = [0u8; 6];
+        stream.read_exact(&mut bitfield_buf).await?;
+
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await?;
+        let len = u32::from_be_bytes(len_buf);
+
+        let mut payload = vec![0u8; len as usize];
+        stream.read_exact(&mut payload).await?;
+
+        if payload[0] != 20 {
+            return Err("Not an extended message".into());
+        }
+
+        let ext_id = payload[1];
+
+        if ext_id != 0 {
+            return Err("Not an extended handshake (ext_id != 0)".into());
+        }
+
+        match serde_json::from_value::<ExtendedHandshakeResponse>(
+            Bencode::new().decoder(&payload[2..]).0,
+        ) {
+            Ok(res) => {
+                return Ok(res);
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Failed to parse and handle receiving extended handshake data. FurtherMore {e:?}"
+                )
+                .into());
+            }
+        }
+    }
+
+    pub async fn extd_init_handshaking(
+        &mut self,
+        stream: &mut TcpStream,
+        params: HashMap<String, u8>,
+    ) -> Result<ExtendedHandshakeResponse, Box<dyn std::error::Error>> {
+        let message = self.insert_payload(params).to_full_message();
+        stream.write_all(&message).await?;
+
+        let res = self.extd_receive_handshake(stream).await;
+        res
+    }
+}
 
 #[derive(Debug)]
 pub struct ExtendedExchange<'a> {
@@ -82,15 +247,14 @@ impl<'a> ExtendedExchange<'a> {
 
 #[cfg(test)]
 mod test_extdhandshake {
+
+    use tokio::fs::File;
+
     use super::*;
 
     use crate::connection::connection::PeerConnection;
-    use crate::connection::connection::SwarmManager;
-    use crate::connection::handshake;
     use crate::extension::magnet_link::Parser;
-    use crate::peers::Peers;
-
-    use crate::utils::random;
+    use crate::random;
 
     #[tokio::test]
     async fn test() {
@@ -110,7 +274,7 @@ mod test_extdhandshake {
         let info_hash = hex::decode(info_hash).expect("Could not decode provided info_hash");
         let peer_id = random::generate_magnet_peerid();
 
-        let extd = extd_exchange
+        let ips = extd_exchange
             .set_request(
                 info_hash.clone(),
                 peer_id.clone(), // random string
@@ -124,9 +288,8 @@ mod test_extdhandshake {
             )
             .set_url(announce_url.to_string())
             .request_tracker()
-            .await;
-
-        let ips = extd.peers_ip();
+            .await
+            .peers_ip();
 
         for addr in ips {
             if let Ok(mut conn) = PeerConnection::init(addr).await {
@@ -134,8 +297,29 @@ mod test_extdhandshake {
                     .init_handshaking(info_hash.clone(), peer_id.as_bytes().to_vec())
                     .await
                 {
-                    Ok(remote_peer_id) => {
-                        println!("Peer ID: {}", remote_peer_id);
+                    Ok(handshake) => {
+                        if handshake.is_magnet_supported() {
+                            let mut params: HashMap<String, u8> = HashMap::new();
+                            params.insert("ut_metadata".to_string(), 16);
+
+                            let stream = &mut conn.stream.lock().await;
+
+                            match ExtendedHandshake::new()
+                                .extd_init_handshaking(stream, params)
+                                .await
+                            {
+                                Ok(_response) => {
+                                    println!("Peer ID: {}", handshake.remote_peer_id());
+                                    println!(
+                                        "Peer Metadata Extension ID: {:?}",
+                                        _response.m.ut_metadata
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to send extented handshake. FurtherMore: {e}")
+                                }
+                            }
+                        }
                     }
 
                     Err(e) => {
@@ -145,5 +329,13 @@ mod test_extdhandshake {
                 }
             };
         }
+    }
+
+    // #[test]
+    fn tester() {
+        let mut params: HashMap<String, u8> = HashMap::new();
+        params.insert("ut_metadata".to_string(), 16);
+
+        ExtendedHandshake::new().insert_payload(params).to_bytes();
     }
 }

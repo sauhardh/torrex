@@ -14,12 +14,12 @@ pub fn generate_peerid() -> String {
 }
 
 pub fn generate_magnet_peerid() -> String {
-    let prefix = "-RU1000-".to_string();
-    let suffix: String = rand::rng()
+    let pfx = "-RU1000-".to_string(); // This is 8 byte long.
+    let sfx: String = rand::rng()
         .sample_iter(&Alphabetic)
         .take(12)
         .map(char::from)
         .collect();
 
-    format!("{prefix}{suffix}")
+    format!("{pfx}{sfx}")
 }

@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use std::borrow::Cow;
 
-use crate::{bencode::Bencode, random};
+use crate::bencode::Bencode;
+use crate::utils::random;
 
 #[derive(Debug, Serialize, Clone)]
 pub enum Event {

@@ -1,5 +1,3 @@
-use std::io::Read;
-
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 
@@ -56,6 +54,18 @@ impl Handshake {
         self
     }
 
+    /// Returns peer_id of the peer received after handshake.
+    pub fn remote_peer_id(&self) -> String {
+        self.peer_id
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>()
+    }
+
+    pub fn is_magnet_supported(&self) -> bool {
+        self.reserved[5] & 0x10 != 0
+    }
+
     pub async fn handshake_reply(
         &self,
         stream: &mut TcpStream,
@@ -67,7 +77,7 @@ impl Handshake {
     }
 
     #[inline]
-    async fn receive_handshake(
+    pub async fn receive_handshake(
         &self,
         stream: &mut TcpStream,
     ) -> Result<[u8; 68], Box<dyn std::error::Error + Send + Sync>> {

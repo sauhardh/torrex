@@ -28,7 +28,7 @@ pub struct BitFieldInfo {
 
 #[derive(Debug)]
 pub struct PeerConnection {
-    stream: Arc<Mutex<TcpStream>>,
+    pub stream: Arc<Mutex<TcpStream>>,
     pub bitfield_info: BitFieldInfo,
     pub message: Arc<Mutex<Messages>>,
     allocated_pieces: HashSet<u32>,
@@ -61,7 +61,7 @@ impl PeerConnection {
         &mut self,
         info_hash: Vec<u8>,
         peer_id: Vec<u8>,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Handshake, Box<dyn std::error::Error + Send + Sync>> {
         let mut handshake = Handshake::init(info_hash, peer_id);
         // Support for magnet link extension
         let buf: Vec<u8> = handshake.reserve_magnetlink().to_bytes();
@@ -69,10 +69,7 @@ impl PeerConnection {
         let mut stream = self.stream.lock().await;
         stream.write_all(&buf).await?;
 
-        let reply = handshake.handshake_reply(&mut stream).await?;
-
-        let remote_peer_id = reply.peer_id.iter().map(|b| format!("{:02x}", b)).collect();
-        Ok(remote_peer_id)
+        handshake.handshake_reply(&mut stream).await
     }
 
     pub async fn receive_bitfield(&mut self, peer_id: String) {
@@ -356,8 +353,8 @@ impl SwarmManager {
             tasks.push(tokio::spawn(async move {
                 match PeerConnection::init(addr).await {
                     Ok(mut conn) => match conn.init_handshaking(info_hash, self_peer_id).await {
-                        Ok(remote_peer_id) => {
-                            conn.receive_bitfield(remote_peer_id).await;
+                        Ok(handshake) => {
+                            conn.receive_bitfield(handshake.remote_peer_id()).await;
 
                             let mut connections = connections.lock().await;
                             connections.push(conn);
