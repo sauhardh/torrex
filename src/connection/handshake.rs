@@ -56,10 +56,7 @@ impl Handshake {
 
     /// Returns peer_id of the peer received after handshake.
     pub fn remote_peer_id(&self) -> String {
-        self.peer_id
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<String>()
+        self.peer_id.iter().map(|b| format!("{:02x}", b)).collect()
     }
 
     pub fn is_magnet_supported(&self) -> bool {

@@ -1,8 +1,17 @@
 use serde_json::value::Value;
-use std::collections::BTreeMap;
-use tokio::{io::AsyncWriteExt, net::TcpStream};
+use std::{collections::BTreeMap, vec};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 use serde::Serialize;
+
+use crate::{
+    bencode::Bencode,
+    extension::magnet_link,
+    metainfo::{self, Info},
+};
 
 /// The metadata extension supports the following message types.
 #[derive(Debug, Serialize, Clone)]
@@ -88,6 +97,28 @@ impl ExtendedMetadataExchange {
         self
     }
 
+    pub fn data_response(
+        message_len: u32,
+        message_id: u8,
+        extd_msg_id: u8,
+        msg_type: u8,
+        piece: u8,
+        total_size: usize,
+    ) -> ExtendedMetadataExchange {
+        ExtendedMetadataExchange {
+            message_len,
+            message_id,
+            message: MetadataMessage {
+                extd_msg_id,
+                payload: MetadataMessageType::Data {
+                    msg_type,
+                    piece,
+                    total_size,
+                },
+            },
+        }
+    }
+
     /// Id is 20 for all the message implemented by this magnet link extension
     pub fn set_message_id(&mut self, id: Option<u8>) -> &mut Self {
         self.message_id = if id.is_some() { id.unwrap() } else { 20 };
@@ -135,6 +166,58 @@ impl ExtendedMetadataExchange {
 
         Ok(())
     }
+
+    pub async fn receive_data(
+        self,
+        stream: &mut TcpStream,
+    ) -> Result<(ExtendedMetadataExchange, Info), Box<dyn std::error::Error>> {
+        // message length prefix (4 bytes)
+        let mut len = [0u8; 4];
+        stream.read_exact(&mut len).await?;
+        let message_len = u32::from_be_bytes(len);
+
+        let mut payload = vec![0u8; message_len as usize];
+        stream.read_exact(&mut payload).await?;
+
+        // message id (1 byte)
+        let message_id = payload[0];
+
+        // extension id
+        let extd_msg_id = payload[1];
+
+        let ben_dict: BTreeMap<String, Value> =
+            serde_json::from_value(Bencode::new().decoder(&payload[2..]).0).unwrap();
+
+        let msg_type = ben_dict
+            .get("msg_type")
+            .and_then(|x| x.as_u64())
+            .expect("msg_type missing") as u8;
+
+        let piece = ben_dict
+            .get("piece")
+            .and_then(|v| v.as_u64())
+            .expect("piece missing") as u8;
+
+        let total_size = ben_dict
+            .get("total_size")
+            .and_then(|v| v.as_u64())
+            .expect("total_size missing");
+
+        let metadata = &payload[(payload.len() - total_size as usize)..];
+        let metainfo: Info = serde_json::from_value(Bencode::new().decoder(&metadata).0).unwrap();
+
+        Ok((
+            Self::data_response(
+                message_len,
+                message_id,
+                extd_msg_id,
+                msg_type,
+                piece,
+                total_size as usize,
+            ),
+            metainfo,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -146,11 +229,12 @@ mod test_extdmetadataexchange {
     use crate::extension::magnet_link::ExtendedHandshake;
     use crate::extension::magnet_link::ExtendedMetadataExchange;
     use crate::extension::magnet_link::Parser;
+    use crate::metainfo::FileKey;
     use crate::random;
 
     #[tokio::test]
     async fn test() {
-        let url: String = "magnet:?xt=urn:btih:3f994a835e090238873498636b98a3e78d1c34ca&dn=magnet2.gif&tr=http%3A%2F%2Fbittorrent-test-tracker.codecrafters.io%2Fannounce".to_string();
+        let url: String = "magnet:?xt=urn:btih:ad42ce8109f54c99613ce38f9b4d87e70f24a165&dn=magnet1.gif&tr=http%3A%2F%2Fbittorrent-test-tracker.codecrafters.io%2Fannounce".to_string();
         let mut parser = &mut Parser::new(url);
         parser = parser.parse();
 
@@ -204,7 +288,7 @@ mod test_extdmetadataexchange {
                                     let mut metadata = ExtendedMetadataExchange::new();
                                     let v = metadata
                                         .set_message_id(Some(20))
-                                        .set_extension_message_id(0)
+                                        .set_extension_message_id(_response.m.ut_metadata)
                                         .set_request(Some(0))
                                         .to_bytes();
 
@@ -214,6 +298,29 @@ mod test_extdmetadataexchange {
                                             e
                                         );
                                     };
+
+                                    match metadata.receive_data(stream).await {
+                                        Ok(info) => {
+                                            let (length, _files) = match &info.1.key {
+                                                FileKey::SingleFile { length } => {
+                                                    (Some(length), None)
+                                                }
+                                                FileKey::MultiFile { files } => (None, Some(files)),
+                                            };
+
+                                            println!("Tracker URL: {}", announce_url);
+                                            println!("Length: {:?}", length.unwrap());
+                                            println!("Info Hash: {}", parser.magnet_link.xt);
+                                            println!("Piece Length: {:?}", info.1.piece_length);
+                                            println!("Piece Hashes: {:?}", info.1.pieces_hashes())
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "Failed to receive metadata. FurtherMore {:?}",
+                                                e
+                                            );
+                                        }
+                                    }
                                 }
                                 Err(e) => {
                                     eprintln!("Failed to send extented handshake. FurtherMore: {e}")

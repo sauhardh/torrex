@@ -15,16 +15,16 @@ use crate::peers::Event;
 use crate::peers::Peers;
 
 #[derive(Serialize, Deserialize, Debug, Default)]
-struct ExtendedHandshakeM {
+pub struct ExtendedHandshakeM {
     #[serde(default)]
-    ut_metadata: u8,
+    pub ut_metadata: u8,
     ut_pex: Option<u8>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ExtendedHandshakeResponse {
     #[serde(default)]
-    m: ExtendedHandshakeM,
+    pub m: ExtendedHandshakeM,
     metadata_size: Option<u32>,
     reqq: Option<u32>,
     #[serde(default)]

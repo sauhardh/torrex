@@ -95,7 +95,6 @@ impl TorrentFile {
         let bencoded = Bencode::new();
 
         let output = bencoded.decoder(&encoded_value);
-        println!("Output {:#?}", output.0);
         let file: TorrentFile = serde_json::from_value(output.0).unwrap();
 
         return file;

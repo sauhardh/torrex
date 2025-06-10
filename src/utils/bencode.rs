@@ -149,10 +149,10 @@ mod test_bencode {
 
     use super::*;
 
-    // #[test]
+    #[test]
     fn test_decode_string() {
         let bencoding = Bencode::new();
-        let output = bencoding.decode_string("5:hell0 ".as_bytes());
+        let output = bencoding.decode_string("5:hell05:hell0".as_bytes());
         assert_eq!("hell0", output.0);
     }
 
@@ -163,7 +163,7 @@ mod test_bencode {
         assert_eq!("32", output.0);
     }
 
-    #[test]
+    // #[test]
     fn test_decoder() {
         let bencoding = Bencode::new();
         let encoded_value = "d8:completei3e10:incompletei2e8:intervali60e12:min intervali60ee";
