@@ -1,3 +1,5 @@
 pub mod connection;
-pub mod message;
 pub mod handshake;
+pub mod message;
+
+pub use connection::PeerConnection;
