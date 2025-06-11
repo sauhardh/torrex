@@ -146,9 +146,7 @@ impl ExtendedHandshake {
             return Err("Not an extended message".into());
         }
 
-        let ext_id = payload[1];
-
-        if ext_id != 0 {
+        if payload[1] != 0 {
             return Err("Not an extended handshake (ext_id != 0)".into());
         }
 

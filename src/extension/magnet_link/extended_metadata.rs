@@ -1,5 +1,8 @@
 use serde_json::value::Value;
-use std::{collections::BTreeMap, vec};
+use std::{
+    collections::{BTreeMap, HashMap},
+    vec,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -9,8 +12,10 @@ use serde::Serialize;
 
 use crate::{
     bencode::Bencode,
-    extension::magnet_link,
-    metainfo::{self, Info},
+    connection::PeerConnection,
+    extension::magnet_link::{self, ExtendedHandshake},
+    handshake::Handshake,
+    metainfo::{self, FileKey, Info},
 };
 
 /// The metadata extension supports the following message types.
@@ -218,56 +223,14 @@ impl ExtendedMetadataExchange {
             metainfo,
         ))
     }
-}
 
-#[cfg(test)]
-mod test_extdmetadataexchange {
-    use std::collections::HashMap;
-
-    use crate::connection::PeerConnection;
-    use crate::extension::magnet_link::ExtendedExchange;
-    use crate::extension::magnet_link::ExtendedHandshake;
-    use crate::extension::magnet_link::ExtendedMetadataExchange;
-    use crate::extension::magnet_link::Parser;
-    use crate::metainfo::FileKey;
-    use crate::random;
-
-    #[tokio::test]
-    async fn test() {
-        let url: String = "magnet:?xt=urn:btih:ad42ce8109f54c99613ce38f9b4d87e70f24a165&dn=magnet1.gif&tr=http%3A%2F%2Fbittorrent-test-tracker.codecrafters.io%2Fannounce".to_string();
-        let mut parser = &mut Parser::new(url);
-        parser = parser.parse();
-
-        let info_hash = &parser.magnet_link.xt.clone();
-        let announce_url = &parser
-            .magnet_link
-            .tr
-            .clone()
-            .expect("Tracker URL (tr=...) missing in magnet link");
-
-        let mut extd_exchange = ExtendedExchange::new(parser);
-
-        let info_hash = hex::decode(info_hash).expect("Could not decode provided info_hash");
-        let peer_id = random::generate_magnet_peerid();
-
-        let ips = extd_exchange
-            .set_request(
-                info_hash.clone(),
-                peer_id.clone(), // random string
-                None,
-                6881,
-                0,
-                0,
-                999,
-                None,
-                1,
-            )
-            .set_url(announce_url.to_string())
-            .request_tracker()
-            .await
-            .peers_ip();
-
-        for addr in ips {
+    pub async fn handshaking(
+        &self,
+        ips: Vec<String>,
+        info_hash: Vec<u8>,
+        peer_id: &String,
+    ) -> Option<(ExtendedMetadataExchange, Info)> {
+        for addr in ips.clone() {
             if let Ok(mut conn) = PeerConnection::init(addr).await {
                 match conn
                     .init_handshaking(info_hash.clone(), peer_id.as_bytes().to_vec())
@@ -308,22 +271,22 @@ mod test_extdmetadataexchange {
                                                 FileKey::MultiFile { files } => (None, Some(files)),
                                             };
 
-                                            println!("Tracker URL: {}", announce_url);
-                                            println!("Length: {:?}", length.unwrap());
-                                            println!("Info Hash: {}", parser.magnet_link.xt);
-                                            println!("Piece Length: {:?}", info.1.piece_length);
-                                            println!("Piece Hashes: {:?}", info.1.pieces_hashes())
+                                            return Some(info);
                                         }
                                         Err(e) => {
                                             eprintln!(
                                                 "Failed to receive metadata. FurtherMore {:?}",
                                                 e
                                             );
+                                            continue;
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!("Failed to send extented handshake. FurtherMore: {e}")
+                                    eprintln!(
+                                        "Failed to send extented handshake. FurtherMore: {e}"
+                                    );
+                                    continue;
                                 }
                             }
                         }
@@ -331,10 +294,89 @@ mod test_extdmetadataexchange {
 
                     Err(e) => {
                         eprintln!("Error occured on initiating handshake {e:?} ",);
-                        return;
+                        continue;
                     }
                 }
             };
         }
+
+        None
+    }
+}
+
+#[cfg(test)]
+mod test_extdmetadataexchange {
+    use std::collections::HashMap;
+    use std::fs::File;
+
+    use crate::connection::PeerConnection;
+    use crate::connection::connection::SwarmManager;
+    use crate::extension::magnet_link::ExtendedExchange;
+    use crate::extension::magnet_link::ExtendedHandshake;
+    use crate::extension::magnet_link::ExtendedMetadataExchange;
+    use crate::extension::magnet_link::Parser;
+    use crate::handshake;
+    use crate::metainfo::FileKey;
+    use crate::random;
+
+    #[tokio::test]
+    async fn test() {
+        let url: String = "magnet:?xt=urn:btih:ad42ce8109f54c99613ce38f9b4d87e70f24a165&dn=magnet1.gif&tr=http%3A%2F%2Fbittorrent-test-tracker.codecrafters.io%2Fannounce".to_string();
+        let mut parser = &mut Parser::new(url);
+        parser = parser.parse();
+
+        let info_hash = &parser.magnet_link.xt.clone();
+        let announce_url = &parser
+            .magnet_link
+            .tr
+            .clone()
+            .expect("Tracker URL (tr=...) missing in magnet link");
+
+        let mut extd_handshake = ExtendedExchange::new(parser);
+
+        let info_hash = hex::decode(info_hash).expect("Could not decode provided info_hash");
+        let peer_id = random::generate_magnet_peerid();
+
+        let ips = extd_handshake
+            .set_request(
+                info_hash.clone(),
+                peer_id.clone(), // random string
+                None,
+                6881,
+                0,
+                0,
+                999,
+                None,
+                1,
+            )
+            .set_url(announce_url.to_string())
+            .request_tracker()
+            .await
+            .peers_ip();
+
+        let self_peer_id = random::generate_magnet_peerid();
+        let extd = ExtendedMetadataExchange::new();
+        let info = extd
+            .handshaking(ips.clone(), info_hash.clone(), &peer_id)
+            .await
+            .unwrap();
+
+        let (length, _files) = match &info.1.key {
+            FileKey::SingleFile { length } => (Some(length), None),
+            FileKey::MultiFile { files } => (None, Some(files)),
+        };
+
+        let mut dm = SwarmManager::init();
+
+        dm.connect_and_exchange_bitfield(ips, info_hash.to_vec(), self_peer_id.as_bytes().to_vec())
+            .await;
+
+        dm.destination(format!("{}{}", "/tmp/", info.1.name.clone()))
+            .final_peer_msg(
+                length.unwrap().clone(),
+                &info.1.pieces_hashes(),
+                info.1.piece_length,
+            )
+            .await;
     }
 }

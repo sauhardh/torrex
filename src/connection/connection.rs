@@ -17,6 +17,9 @@ use crate::connection::handshake::Handshake;
 use crate::connection::message::MessageType;
 use crate::connection::message::Messages;
 use crate::cryptography::sha1_hash;
+use crate::extension::magnet_link::ExtendedHandshake;
+use crate::extension::magnet_link::ExtendedMetadataExchange;
+use crate::metainfo::FileKey;
 
 const BLOCK_SIZE: u32 = 16_384;
 
@@ -273,6 +276,7 @@ impl PeerConnection {
                     eprintln!("Failed to save to file for index {index}. FurtherMore: {e}");
                 };
 
+                println!("Downlaod Successfull, Path: {destination} for index {index}");
                 return Ok(());
             } else {
                 return Err("SHA-1 mismatch".into());
@@ -497,9 +501,10 @@ impl SwarmManager {
                             message.interested().await;
 
                             if !message.wait_unchoke().await {
-                                eprintln!("Peer {} did not unchoke, skipping", peer);
-
-                                return;
+                                if !message.wait_unchoke().await {
+                                    eprintln!("Peer {} did not unchoke, skipping", peer);
+                                    return;
+                                }
                             };
                             unchoked_peers.lock().await.insert(peer.clone());
                         }

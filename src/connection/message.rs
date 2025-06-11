@@ -5,6 +5,9 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use std::collections::HashSet;
+use std::fmt::Debug;
+use std::pin::Pin;
+use std::process::Output;
 use std::sync::Arc;
 use std::time::Duration;
 use std::vec;
@@ -183,8 +186,8 @@ impl Messages {
         self
     }
 
-    pub async fn wait_unchoke(&mut self) -> bool {
-        match timeout(Duration::from_secs(5), self.exchange_msg()).await {
+    pub async fn wait_unchoke<'a>(&'a mut self) -> bool {
+        match timeout(Duration::from_secs(7), self.exchange_msg()).await {
             Ok(Ok(_)) if self.message_type == MessageType::Unchoke => true,
             Ok(Ok(_)) => false,
 
