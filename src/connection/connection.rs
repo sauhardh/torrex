@@ -20,6 +20,7 @@ use crate::cryptography::sha1_hash;
 use crate::extension::magnet_link::ExtendedHandshake;
 use crate::extension::magnet_link::ExtendedMetadataExchange;
 use crate::metainfo::FileKey;
+use crate::metainfo::Info;
 
 const BLOCK_SIZE: u32 = 16_384;
 
@@ -81,9 +82,9 @@ impl PeerConnection {
             message.wait_bitfield().await
         };
 
-        if let Some(bitfield_payload) = output {
+        if let Some(payload) = output {
             self.bitfield_info.peer_id = peer_id;
-            self.bitfield_info.present_pieces = bitfield_payload.into();
+            self.bitfield_info.present_pieces = payload.into();
         };
     }
 
@@ -322,6 +323,7 @@ pub struct SwarmManager {
     self_peer_id: String,
     destination: String,
     peer_pieces: HashMap<String, Vec<u32>>,
+    // pub metadata: Arc<Mutex<Option<(ExtendedMetadataExchange, Info)>>>,
 }
 
 impl SwarmManager {
@@ -331,6 +333,7 @@ impl SwarmManager {
             self_peer_id: String::new(),
             destination: String::new(),
             peer_pieces: HashMap::new(),
+            // metadata: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -340,6 +343,8 @@ impl SwarmManager {
         self
     }
 
+    async fn magnet_link_exchange(&self) {}
+
     pub async fn connect_and_exchange_bitfield(
         &mut self,
         ip_addr: Vec<String>,
@@ -348,11 +353,14 @@ impl SwarmManager {
     ) {
         let mut tasks = vec![];
         self.self_peer_id = peer_id.iter().map(|b| format!("{:02x}", b)).collect();
+        // let running = Arc::new(Mutex::new(false));
 
         for addr in ip_addr {
             let info_hash = info_hash.clone();
             let self_peer_id = peer_id.clone();
             let connections = Arc::clone(&self.connections);
+            // let metadata_storage = Arc::clone(&self.metadata);
+            // let running = Arc::clone(&running);
 
             tasks.push(tokio::spawn(async move {
                 match PeerConnection::init(addr).await {

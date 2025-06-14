@@ -165,8 +165,8 @@ impl ExtendedMetadataExchange {
     pub async fn send_request(
         &self,
         stream: &mut TcpStream,
-        value: &Vec<u8>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+        value: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
         stream.write_all(&value).await?;
 
         Ok(())
@@ -175,7 +175,7 @@ impl ExtendedMetadataExchange {
     pub async fn receive_data(
         self,
         stream: &mut TcpStream,
-    ) -> Result<(ExtendedMetadataExchange, Info), Box<dyn std::error::Error>> {
+    ) -> Result<(ExtendedMetadataExchange, Info), Box<dyn std::error::Error + Send + Sync>> {
         // message length prefix (4 bytes)
         let mut len = [0u8; 4];
         stream.read_exact(&mut len).await?;
@@ -366,12 +366,16 @@ mod test_extdmetadataexchange {
             FileKey::MultiFile { files } => (None, Some(files)),
         };
 
-        let mut dm = SwarmManager::init();
-
-        dm.connect_and_exchange_bitfield(ips, info_hash.to_vec(), self_peer_id.as_bytes().to_vec())
+        let mut sm = SwarmManager::init();
+        sm.connect_and_exchange_bitfield(ips, info_hash.to_vec(), self_peer_id.as_bytes().to_vec())
             .await;
 
-        dm.destination(format!("{}{}", "/tmp/", info.1.name.clone()))
+        let (length, _files) = match &info.1.key {
+            FileKey::SingleFile { length } => (Some(length), None),
+            FileKey::MultiFile { files } => (None, Some(files)),
+        };
+
+        sm.destination(format!("{}{}", "/tmp/", info.1.name))
             .final_peer_msg(
                 length.unwrap().clone(),
                 &info.1.pieces_hashes(),
@@ -380,3 +384,38 @@ mod test_extdmetadataexchange {
             .await;
     }
 }
+
+/*
+
+     // let extd = ExtendedMetadataExchange::new();
+        // let info = extd
+        //     .handshaking(ips.clone(), info_hash.clone(), &peer_id)
+        //     .await
+        //     .unwrap();
+
+        // let (length, _files) = match &info.1.key {
+        //     FileKey::SingleFile { length } => (Some(length), None),
+        //     FileKey::MultiFile { files } => (None, Some(files)),
+        // };
+
+        let mut sm = SwarmManager::init();
+        sm.connect_and_exchange_bitfield(ips, info_hash.to_vec(), self_peer_id.as_bytes().to_vec())
+            .await;
+
+        let info = &mut sm.metadata.lock().await;
+        let (length, _files) = match &info.as_ref().unwrap().1.key {
+            FileKey::SingleFile { length } => (Some(length), None),
+            FileKey::MultiFile { files } => (None, Some(files)),
+        };
+
+        println!("info {:?}", info);
+
+        // sm.destination(format!("{}{}", "/tmp/", name))
+        //     .final_peer_msg(
+        //         length.unwrap().clone(),
+        //         &info.unwrap().1.pieces_hashes(),
+        //         info.unwrap().1.piece_length,
+        //     )
+        //     .await;
+
+*/
