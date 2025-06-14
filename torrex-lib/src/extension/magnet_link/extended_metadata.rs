@@ -13,9 +13,8 @@ use serde::Serialize;
 use crate::{
     bencode::Bencode,
     connection::PeerConnection,
-    extension::magnet_link::{self, ExtendedHandshake},
-    handshake::Handshake,
-    metainfo::{self, FileKey, Info},
+    extension::magnet_link::ExtendedHandshake,
+    metainfo::{FileKey, Info},
 };
 
 /// The metadata extension supports the following message types.
@@ -306,22 +305,18 @@ impl ExtendedMetadataExchange {
 
 #[cfg(test)]
 mod test_extdmetadataexchange {
-    use std::collections::HashMap;
-    use std::fs::File;
 
-    use crate::connection::PeerConnection;
     use crate::connection::connection::SwarmManager;
     use crate::extension::magnet_link::ExtendedExchange;
-    use crate::extension::magnet_link::ExtendedHandshake;
     use crate::extension::magnet_link::ExtendedMetadataExchange;
     use crate::extension::magnet_link::Parser;
-    use crate::handshake;
     use crate::metainfo::FileKey;
     use crate::random;
 
     #[tokio::test]
     async fn test() {
-        let url: String = "magnet:?xt=urn:btih:ad42ce8109f54c99613ce38f9b4d87e70f24a165&dn=magnet1.gif&tr=http%3A%2F%2Fbittorrent-test-tracker.codecrafters.io%2Fannounce".to_string();
+        // let url: String = "magnet:?xt=urn:btih:ad42ce8109f54c99613ce38f9b4d87e70f24a165&dn=magnet1.gif&tr=http%3A%2F%2Fbittorrent-test-tracker.codecrafters.io%2Fannounce".to_string();
+        let url: String = "magnet:?xt=urn:btih:c5fb9894bdaba464811b088d806bdd611ba490af&dn=magnet3.gif&tr=http%3A%2F%2Fbittorrent-test-tracker.codecrafters.io%2Fannounce".to_string();
         let mut parser = &mut Parser::new(url);
         parser = parser.parse();
 
@@ -370,11 +365,6 @@ mod test_extdmetadataexchange {
         sm.connect_and_exchange_bitfield(ips, info_hash.to_vec(), self_peer_id.as_bytes().to_vec())
             .await;
 
-        let (length, _files) = match &info.1.key {
-            FileKey::SingleFile { length } => (Some(length), None),
-            FileKey::MultiFile { files } => (None, Some(files)),
-        };
-
         sm.destination(format!("{}{}", "/tmp/", info.1.name))
             .final_peer_msg(
                 length.unwrap().clone(),
@@ -384,38 +374,3 @@ mod test_extdmetadataexchange {
             .await;
     }
 }
-
-/*
-
-     // let extd = ExtendedMetadataExchange::new();
-        // let info = extd
-        //     .handshaking(ips.clone(), info_hash.clone(), &peer_id)
-        //     .await
-        //     .unwrap();
-
-        // let (length, _files) = match &info.1.key {
-        //     FileKey::SingleFile { length } => (Some(length), None),
-        //     FileKey::MultiFile { files } => (None, Some(files)),
-        // };
-
-        let mut sm = SwarmManager::init();
-        sm.connect_and_exchange_bitfield(ips, info_hash.to_vec(), self_peer_id.as_bytes().to_vec())
-            .await;
-
-        let info = &mut sm.metadata.lock().await;
-        let (length, _files) = match &info.as_ref().unwrap().1.key {
-            FileKey::SingleFile { length } => (Some(length), None),
-            FileKey::MultiFile { files } => (None, Some(files)),
-        };
-
-        println!("info {:?}", info);
-
-        // sm.destination(format!("{}{}", "/tmp/", name))
-        //     .final_peer_msg(
-        //         length.unwrap().clone(),
-        //         &info.unwrap().1.pieces_hashes(),
-        //         info.unwrap().1.piece_length,
-        //     )
-        //     .await;
-
-*/

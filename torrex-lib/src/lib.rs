@@ -11,5 +11,3 @@ pub use extension::magnet_link::ExtendedExchange;
 pub use utils::bencode;
 pub use utils::cryptography;
 pub use utils::random;
-
-fn main() {}

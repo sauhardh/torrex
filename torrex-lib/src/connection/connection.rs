@@ -17,10 +17,6 @@ use crate::connection::handshake::Handshake;
 use crate::connection::message::MessageType;
 use crate::connection::message::Messages;
 use crate::cryptography::sha1_hash;
-use crate::extension::magnet_link::ExtendedHandshake;
-use crate::extension::magnet_link::ExtendedMetadataExchange;
-use crate::metainfo::FileKey;
-use crate::metainfo::Info;
 
 const BLOCK_SIZE: u32 = 16_384;
 
@@ -353,14 +349,11 @@ impl SwarmManager {
     ) {
         let mut tasks = vec![];
         self.self_peer_id = peer_id.iter().map(|b| format!("{:02x}", b)).collect();
-        // let running = Arc::new(Mutex::new(false));
 
         for addr in ip_addr {
             let info_hash = info_hash.clone();
             let self_peer_id = peer_id.clone();
             let connections = Arc::clone(&self.connections);
-            // let metadata_storage = Arc::clone(&self.metadata);
-            // let running = Arc::clone(&running);
 
             tasks.push(tokio::spawn(async move {
                 match PeerConnection::init(addr).await {
