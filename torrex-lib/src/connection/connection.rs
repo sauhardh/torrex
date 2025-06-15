@@ -32,7 +32,7 @@ pub struct PeerConnection {
     pub bitfield_info: BitFieldInfo,
     pub message: Arc<Mutex<Messages>>,
     allocated_pieces: HashSet<u32>,
-    block_storage: Arc<Mutex<HashMap<u32, BTreeMap<u32, Vec<u8>>>>>,
+    block_storage: Arc<RwLock<HashMap<u32, BTreeMap<u32, Vec<u8>>>>>,
     block_book: Arc<RwLock<HashMap<u32, usize>>>,
 }
 
@@ -52,7 +52,7 @@ impl PeerConnection {
             },
             message,
             allocated_pieces: HashSet::new(),
-            block_storage: Arc::new(Mutex::new(HashMap::new())),
+            block_storage: Arc::new(RwLock::new(HashMap::new())),
             block_book: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -142,8 +142,8 @@ impl PeerConnection {
                         block,
                     } => {
                         {
-                            let mut block_storage = self.block_storage.lock().await;
-                            block_storage
+                            let mut storage = self.block_storage.write().await;
+                            storage
                                 .entry(index)
                                 .or_default()
                                 .insert(begin, block.clone());
@@ -235,7 +235,7 @@ impl PeerConnection {
         actual_piece_length: usize,
         flag: &Option<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let storage = self.block_storage.lock().await;
+        let storage = self.block_storage.read().await;
         if let Some(blocks) = storage.get(&index) {
             let mut data = Vec::with_capacity(actual_piece_length);
 
@@ -319,7 +319,6 @@ pub struct SwarmManager {
     self_peer_id: String,
     destination: String,
     peer_pieces: HashMap<String, Vec<u32>>,
-    // pub metadata: Arc<Mutex<Option<(ExtendedMetadataExchange, Info)>>>,
 }
 
 impl SwarmManager {
@@ -329,7 +328,6 @@ impl SwarmManager {
             self_peer_id: String::new(),
             destination: String::new(),
             peer_pieces: HashMap::new(),
-            // metadata: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -448,9 +446,9 @@ impl SwarmManager {
         let total_pieces = (file_size + piece_len - 1) / piece_len;
 
         //<< For Passing through asynchronous task.
-        let completed_pieces: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
-        let unchoked_peers: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-        let downloading_pieces: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
+        let completed_pieces: Arc<RwLock<HashSet<u32>>> = Arc::new(RwLock::new(HashSet::new()));
+        let unchoked_peers: Arc<RwLock<HashSet<String>>> = Arc::new(RwLock::new(HashSet::new()));
+        let working_pieces: Arc<RwLock<HashSet<u32>>> = Arc::new(RwLock::new(HashSet::new()));
 
         let mut tasks = Vec::new();
 
@@ -464,7 +462,7 @@ impl SwarmManager {
             let destination = Arc::clone(&destination);
             let completed_pieces = Arc::clone(&completed_pieces);
             let unchoked_peers = Arc::clone(&unchoked_peers);
-            let downloading_pieces = Arc::clone(&downloading_pieces);
+            let working_pieces = Arc::clone(&working_pieces);
             let pieces = Arc::clone(&pieces);
 
             let indexes = indexes.clone();
@@ -473,13 +471,13 @@ impl SwarmManager {
             tasks.push(tokio::spawn(async move {
                 for index in indexes {
                     let pieces_completed_or_downloading = {
-                        let completed_pieces = completed_pieces.lock().await;
-                        let mut working_pieces = downloading_pieces.lock().await;
+                        let completed = completed_pieces.read().await;
+                        let mut working = working_pieces.write().await;
 
-                        if completed_pieces.contains(&index) || working_pieces.contains(&index) {
+                        if completed.contains(&index) || working.contains(&index) {
                             true
                         } else {
-                            working_pieces.insert(index);
+                            working.insert(index);
                             false
                         }
                     };
@@ -494,7 +492,7 @@ impl SwarmManager {
                         .find(|x| x.bitfield_info.peer_id == *peer)
                     {
                         let should_unchoke = {
-                            let unchoke = unchoked_peers.lock().await;
+                            let unchoke = unchoked_peers.read().await;
                             !unchoke.contains(&peer)
                         };
                         if should_unchoke {
@@ -507,7 +505,7 @@ impl SwarmManager {
                                     return;
                                 }
                             };
-                            unchoked_peers.lock().await.insert(peer.clone());
+                            unchoked_peers.write().await.insert(peer.clone());
                         }
 
                         let actual_piece_length = if index as usize == total_pieces - 1 {
@@ -531,13 +529,14 @@ impl SwarmManager {
                         };
 
                         // To Mark pieces of particular index as completed
-                        let mut completed = completed_pieces.lock().await;
+                        // let mut completed = completed_pieces.lock().await;
+                        let mut completed = completed_pieces.write().await;
                         completed.insert(index);
                         drop(completed);
 
                         // It's no longer downloading as it should have already downloaded by now.
-                        let mut downloading = downloading_pieces.lock().await;
-                        downloading.remove(&index);
+                        let mut working = working_pieces.write().await;
+                        working.remove(&index);
                     }
                 }
             }));

@@ -1,4 +1,6 @@
 [workspace]
-members = [
-    "torrex-lib"
+resolver = "3"
+members = [ "torrex-api",
+    "torrex-lib",
+    "torrex-api"
 ]
