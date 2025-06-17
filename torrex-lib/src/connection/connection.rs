@@ -567,10 +567,11 @@ mod test_connection {
         let encoded_data = meta.read_file(Path::new("./sample.torrent")).unwrap();
         let meta: TorrentFile = meta.parse_metafile(&encoded_data);
 
-        let (_length, _files) = match &meta.info.key {
+        let (length, _files) = match &meta.info.key {
             FileKey::SingleFile { length } => (Some(length), None),
             FileKey::MultiFile { files } => (None, Some(files)),
         };
+
         let info_hash = meta.info_hash(&encoded_data).unwrap();
 
         // Discovering peers
@@ -584,7 +585,7 @@ mod test_connection {
             6881,
             0,
             0,
-            *_length.unwrap(),
+            *length.unwrap(),
             None,
             1,
         );
@@ -609,7 +610,7 @@ mod test_connection {
 
         dm.destination("/tmp/testing.txt".to_string())
             .final_peer_msg(
-                _length.unwrap().clone(),
+                length.unwrap().clone(),
                 &meta.info.pieces_hashes(),
                 meta.info.piece_length,
             )

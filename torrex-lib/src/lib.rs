@@ -1,12 +1,11 @@
-mod connection;
-mod extension;
-mod metainfo;
-mod peers;
+pub mod connection;
+pub mod extension;
+pub mod metainfo;
+pub mod peers;
 mod utils;
 
 pub use connection::handshake;
 pub use connection::message;
-pub use extension::magnet_link::ExtendedExchange;
 
 pub use utils::bencode;
 pub use utils::cryptography;

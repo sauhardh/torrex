@@ -11,7 +11,7 @@ use std::path::Path;
 use crate::bencode::Bencode;
 use crate::cryptography::sha1_hash;
 
-#[derive(Default, Deserialize, Debug, Serialize)]
+#[derive(Default, Deserialize, Debug, Serialize, Clone)]
 pub struct File {
     /// length of the file in bytes (integer)
     pub length: usize,
@@ -21,7 +21,7 @@ pub struct File {
     pub path: Vec<String>,
 }
 
-#[derive(Deserialize, Debug, Serialize)]
+#[derive(Deserialize, Debug, Serialize, Clone)]
 #[serde(untagged)]
 pub enum FileKey {
     SingleFile { length: usize },
