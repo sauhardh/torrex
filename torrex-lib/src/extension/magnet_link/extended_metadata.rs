@@ -72,7 +72,7 @@ impl Into<BTreeMap<&'static str, serde_json::value::Value>> for MetadataMessageT
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct MetadataMessage {
     // peer's metadata extension ID, which is received during the extension handshake.
     extd_msg_id: u8,
@@ -80,7 +80,7 @@ pub struct MetadataMessage {
     payload: MetadataMessageType,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ExtendedMetadataExchange {
     message_len: u32,
     message_id: u8,

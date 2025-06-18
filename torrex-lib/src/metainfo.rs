@@ -34,7 +34,7 @@ impl Default for FileKey {
     }
 }
 
-#[derive(Default, Deserialize, Debug, Serialize)]
+#[derive(Default, Deserialize, Debug, Serialize, Clone)]
 pub struct Info {
     /// UTF-8 encoded string which is suggested name to save the file (for a singlefile case) or directory (for a multifile case) as. It is purely advisory.
     pub name: String,
@@ -63,7 +63,7 @@ impl Info {
     }
 }
 
-#[derive(Default, Deserialize, Debug, Serialize)]
+#[derive(Default, Deserialize, Debug, Serialize, Clone)]
 pub struct TorrentFile {
     ///  The URL of the tracker.
     pub announce: String,

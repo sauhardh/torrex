@@ -1,16 +1,17 @@
-use std::collections::HashMap;
-use std::sync::Mutex;
-
 use actix_web::App;
 use actix_web::HttpServer;
+use actix_web::middleware;
 use actix_web::web;
 use log::info;
+
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 mod controller;
 mod state;
 
-use controller::start_download_magnetlink;
-use controller::start_download_torrentfile;
+use controller::initial_download_info_magnet;
+use controller::initial_download_info_metafile;
 use state::AppState;
 
 use crate::controller::init;
@@ -18,7 +19,8 @@ use crate::controller::init;
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
-    info!("Starting server");
+    const PORT: u16 = 7878;
+    info!("Starting server localhost at port {PORT}");
 
     let app_state = web::Data::new(AppState {
         downloads: Mutex::new(HashMap::new()),
@@ -27,12 +29,15 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new().app_data(app_state.clone()).service(
             web::scope("/torrex/api/v1")
-                .service(start_download_torrentfile)
-                .service(start_download_magnetlink)
-                .service(init),
+                .service(init)
+                .service(initial_download_info_magnet)
+                .service(initial_download_info_metafile)
+                .wrap(middleware::NormalizePath::trim())
+                .wrap(middleware::Logger::default()),
         )
     })
-    .bind(("127.0.0.1", 7878))?
+    .workers(3)
+    .bind(("127.0.0.1", PORT))?
     .run()
     .await
 }

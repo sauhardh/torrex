@@ -1,18 +1,20 @@
-use torrex_lib::extension::magnet_link::ExtendedMetadataExchange;
-use torrex_lib::metainfo;
-use torrex_lib::metainfo::TorrentFile;
 use uuid::Uuid;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use torrex_lib::extension::magnet_link::ExtendedMetadataExchange;
+use torrex_lib::metainfo;
+use torrex_lib::metainfo::TorrentFile;
+
+#[derive(Clone)]
 pub enum DownloadKind {
     meta(TorrentFile),
     magnet((ExtendedMetadataExchange, metainfo::Info)),
 }
 
 pub struct DownloadState {
-    kind: DownloadKind,
+    pub kind: DownloadKind,
 }
 
 impl DownloadState {

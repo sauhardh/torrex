@@ -3,20 +3,23 @@ use actix_web::Responder;
 use actix_web::get;
 use actix_web::post;
 use actix_web::web;
+use actix_ws::AggregatedMessage;
 use serde::Deserialize;
-use torrex_lib::metainfo;
 use uuid::Uuid;
+use uuid::uuid;
 
 use std::path::Path;
 
 use torrex_lib::extension::magnet_link::ExtendedExchange;
 use torrex_lib::extension::magnet_link::ExtendedMetadataExchange;
 use torrex_lib::extension::magnet_link::Parser;
+use torrex_lib::metainfo;
 use torrex_lib::metainfo::FileKey;
 use torrex_lib::metainfo::TorrentFile;
 use torrex_lib::random;
 
 use crate::state::AppState;
+use crate::state::DownloadKind;
 use crate::state::DownloadState;
 
 #[get("")]
@@ -32,8 +35,8 @@ struct TorrentFileQuery {
     filepath: String,
 }
 
-#[get("/start_download_torrentfile")]
-pub async fn start_download_torrentfile(
+#[get("/initial_info_metafile")]
+pub async fn initial_download_info_metafile(
     state: web::Data<AppState>,
     req_body: web::Query<TorrentFileQuery>,
 ) -> impl Responder {
@@ -75,7 +78,9 @@ pub async fn start_download_torrentfile(
         serde_json::json!({
             "uuid": id.to_string(),
             "name": name,
-            "length": length.unwrap()
+            "length": length.unwrap(),
+            "status": "ok",
+
         })
     })
 }
@@ -85,8 +90,8 @@ struct MagnetLinkQuery {
     url: String,
 }
 
-#[get("/start_download_magnetlink")]
-pub async fn start_download_magnetlink(
+#[get("/initial_info_magnet")]
+pub async fn initial_download_info_magnet(
     state: web::Data<AppState>,
     req_body: web::Query<MagnetLinkQuery>,
 ) -> impl Responder {
@@ -171,7 +176,56 @@ pub async fn start_download_magnetlink(
         serde_json::json!({
             "uuid": id.to_string(),
             "name": name,
-            "length": length
-        })
+            "length": length,
+            "status": "ok",
+
+        });
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct StartDownloadQuery {
+    uuid: String,
+}
+
+#[post("/start_download")]
+pub async fn start_download(
+    req_body: web::Json<StartDownloadQuery>,
+    state: web::Data<AppState>,
+) -> impl Responder {
+    let Ok(uuid) = Uuid::parse_str(&req_body.uuid) else {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "status":"false",
+            "message":"Failed to parse uuid to string"
+        }));
+    };
+
+    let kind = {
+        let state = state.downloads.lock();
+        if let Ok(state) = state {
+            if let Some(dl_state) = state.get(&uuid) {
+                dl_state.kind.clone()
+            } else {
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "status":"false",
+                    "message":format!("Failed to match the downloading state with provided uuid: {}",uuid)
+                }));
+            }
+        } else {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "status":"false",
+                "message":format!("Initial download state is not present.")
+            }));
+        }
+    };
+
+    
+
+    HttpResponse::Ok().json({
+        serde_json::json!({
+            "uuid":"",
+            "status": "ok",
+            "message": "Download has been started"
+        });
     })
 }
