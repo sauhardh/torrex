@@ -74,7 +74,7 @@ pub async fn initial_download_info_metafile(
         }
     };
 
-    HttpResponse::Ok().json({
+    return HttpResponse::Ok().json({
         serde_json::json!({
             "uuid": id.to_string(),
             "name": name,
@@ -82,7 +82,7 @@ pub async fn initial_download_info_metafile(
             "status": "ok",
 
         })
-    })
+    });
 }
 
 #[derive(Debug, Deserialize)]
@@ -172,15 +172,13 @@ pub async fn initial_download_info_magnet(
         }
     };
 
-    HttpResponse::Ok().json({
+    return HttpResponse::Ok().json({
         serde_json::json!({
             "uuid": id.to_string(),
             "name": name,
-            "length": length,
-            "status": "ok",
-
-        });
-    })
+            "length": length.unwrap()
+        })
+    });
 }
 
 #[derive(Debug, Deserialize)]
@@ -219,13 +217,11 @@ pub async fn start_download(
         }
     };
 
-    
-
-    HttpResponse::Ok().json({
+    return HttpResponse::Ok().json({
         serde_json::json!({
             "uuid":"",
             "status": "ok",
             "message": "Download has been started"
         });
-    })
+    });
 }

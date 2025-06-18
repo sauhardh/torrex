@@ -32,7 +32,6 @@ async fn main() -> std::io::Result<()> {
                 .service(init)
                 .service(initial_download_info_magnet)
                 .service(initial_download_info_metafile)
-                .wrap(middleware::NormalizePath::trim())
                 .wrap(middleware::Logger::default()),
         )
     })
