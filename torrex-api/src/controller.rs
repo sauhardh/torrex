@@ -32,17 +32,29 @@ struct TorrentFileQuery {
     filepath: String,
 }
 
-#[post("/start_download_torrentfile")]
+#[get("/start_download_torrentfile")]
 pub async fn start_download_torrentfile(
     state: web::Data<AppState>,
-    req_body: web::Json<TorrentFileQuery>,
+    req_body: web::Query<TorrentFileQuery>,
 ) -> impl Responder {
     let id = Uuid::new_v4();
 
-    println!("req body {:?}", req_body);
-
+    let file_path = format!("{}", &req_body.filepath.trim_matches('"'));
     let mut meta = TorrentFile::new();
-    let encoded_data = meta.read_file(Path::new(&req_body.filepath)).unwrap();
+
+    let encoded_data = match meta.read_file(Path::new(&file_path)) {
+        Ok(value) => value,
+
+        Err(e) => {
+            return HttpResponse::BadRequest().json({
+                serde_json::json!({
+                    "status": "false",
+                    "message":format!("Failed to read file for given path. Error: {}",e)
+                })
+            });
+        }
+    };
+
     meta = meta.parse_metafile(&encoded_data);
 
     let name = meta.info.name.clone();
@@ -55,7 +67,7 @@ pub async fn start_download_torrentfile(
     {
         let state = state.downloads.lock();
         if let Ok(mut state) = state {
-            state.insert(id, DownloadState::new(Some(meta), None));
+            state.insert(id, DownloadState::new_meta(meta));
         }
     };
 
@@ -73,10 +85,10 @@ struct MagnetLinkQuery {
     url: String,
 }
 
-#[post("/start_download_magnetlink")]
+#[get("/start_download_magnetlink")]
 pub async fn start_download_magnetlink(
     state: web::Data<AppState>,
-    req_body: web::Json<MagnetLinkQuery>,
+    req_body: web::Query<MagnetLinkQuery>,
 ) -> impl Responder {
     let id = Uuid::new_v4();
 
@@ -84,17 +96,33 @@ pub async fn start_download_magnetlink(
     parser = parser.parse();
 
     let info_hash = &parser.magnet_link.xt.clone();
-    let announce_url = &parser
-        .magnet_link
-        .tr
-        .clone()
-        .expect("Tracker URL (tr=...) missing in magnet link");
+
+    let (announce_url, name) = match (parser.magnet_link.tr.clone(), parser.magnet_link.dn.clone())
+    {
+        (Some(url), Some(name)) => (url, name),
+        _ => {
+            return HttpResponse::BadRequest().json({
+                serde_json::json!({
+                    "status": "false",
+                    "message":format!("Failed to parse the provided link {:?}. Could not parse announce_url or name of the download.", req_body.url)
+                })
+            });
+        }
+    };
 
     let mut extd_handshake = ExtendedExchange::new(parser);
+    let info_hash = if let Ok(info_hash) = hex::decode(info_hash) {
+        info_hash
+    } else {
+        return HttpResponse::InternalServerError().json({
+            serde_json::json!({
+                "status": "false",
+                "message":format!("Failed to decode the info_hash. Please Check your provided url: {}. if incase error persist, feel free to report", req_body.url)
+            })
+        });
+    };
 
-    let info_hash = hex::decode(info_hash).expect("Could not decode provided info_hash");
     let peer_id = random::generate_magnet_peerid();
-
     let ips = extd_handshake
         .set_request(
             info_hash.clone(),
@@ -113,10 +141,19 @@ pub async fn start_download_magnetlink(
         .peers_ip();
 
     let extd = ExtendedMetadataExchange::new();
-    let info: (ExtendedMetadataExchange, metainfo::Info) = extd
+    let info = if let Some(inf) = extd
         .handshaking(ips.clone(), info_hash.clone(), &peer_id)
         .await
-        .unwrap();
+    {
+        inf
+    } else {
+        return HttpResponse::InternalServerError().json({
+            serde_json::json!({
+                "status": "false",
+                "message":format!("Failed to get metadata from handshaking. Please Check your provided url: {}. if incase error persist, feel free to report", req_body.url)
+            })
+        });
+    };
 
     let (length, _files) = match info.1.key.clone() {
         FileKey::SingleFile { length } => (Some(length), None),
@@ -126,14 +163,14 @@ pub async fn start_download_magnetlink(
     {
         let state = state.downloads.lock();
         if let Ok(mut state) = state {
-            state.insert(id, DownloadState::new(None, Some(info)));
+            state.insert(id, DownloadState::new_magnet(info));
         }
     };
 
     HttpResponse::Ok().json({
         serde_json::json!({
             "uuid": id.to_string(),
-            "name": parser.magnet_link.dn.as_ref().unwrap(),
+            "name": name,
             "length": length
         })
     })

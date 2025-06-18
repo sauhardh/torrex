@@ -6,17 +6,26 @@ use uuid::Uuid;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+pub enum DownloadKind {
+    meta(TorrentFile),
+    magnet((ExtendedMetadataExchange, metainfo::Info)),
+}
+
 pub struct DownloadState {
-    pub meta: Option<TorrentFile>,
-    pub magnet: Option<(ExtendedMetadataExchange, metainfo::Info)>,
+    kind: DownloadKind,
 }
 
 impl DownloadState {
-    pub fn new(
-        meta: Option<TorrentFile>,
-        magnet: Option<(ExtendedMetadataExchange, metainfo::Info)>,
-    ) -> Self {
-        Self { meta, magnet }
+    pub fn new_meta(meta: TorrentFile) -> Self {
+        Self {
+            kind: DownloadKind::meta(meta),
+        }
+    }
+
+    pub fn new_magnet(magnet: (ExtendedMetadataExchange, metainfo::Info)) -> Self {
+        Self {
+            kind: DownloadKind::magnet(magnet),
+        }
     }
 }
 
