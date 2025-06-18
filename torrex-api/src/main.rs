@@ -15,6 +15,7 @@ use controller::initial_download_info_metafile;
 use state::AppState;
 
 use crate::controller::init;
+use crate::controller::start_download;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -27,13 +28,17 @@ async fn main() -> std::io::Result<()> {
     });
 
     HttpServer::new(move || {
-        App::new().app_data(app_state.clone()).service(
-            web::scope("/torrex/api/v1")
-                .service(init)
-                .service(initial_download_info_magnet)
-                .service(initial_download_info_metafile)
-                .wrap(middleware::Logger::default()),
-        )
+        App::new()
+            .app_data(app_state.clone())
+            .service(
+                web::scope("/torrex/api/v1")
+                    .service(init)
+                    .service(initial_download_info_magnet)
+                    .service(initial_download_info_metafile)
+                    .service(start_download),
+            )
+            .wrap(middleware::NormalizePath::trim())
+            .wrap(middleware::Logger::default())
     })
     .workers(3)
     .bind(("127.0.0.1", PORT))?
