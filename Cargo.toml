@@ -1,6 +1,9 @@
-[package]
-name = "torrex"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "2"
+members = [ "torrex-api",
+    "torrex-lib",
+]
 
-[dependencies]
+
+[workspace.dependencies]
+tokio = { version = "1.44.2", features=["full"] }

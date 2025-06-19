@@ -1,0 +1,19 @@
+[package]
+name = "torrex-lib"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+hex = "0.4.3"
+rand = "0.9.1"
+reqwest = "0.12.15"
+serde = { version = "1.0.219", features=["derive"]}
+serde_bencode = "0.2.4"
+serde_bytes = "0.11.17"
+serde_json = "1.0.140"
+sha1 = "0.10.6"
+tokio = { workspace = true }
+urlencoding = "2.1.3"

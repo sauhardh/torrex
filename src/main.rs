@@ -1,3 +1,0 @@
-mod bencode;
-
-fn main() {}
