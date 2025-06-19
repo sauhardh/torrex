@@ -1,10 +1,13 @@
+use actix_web::HttpRequest;
 use actix_web::HttpResponse;
 use actix_web::Responder;
 use actix_web::get;
 use actix_web::post;
+use actix_web::rt;
 use actix_web::web;
 use actix_ws::AggregatedMessage;
 use serde::Deserialize;
+use serde_json::json;
 use uuid::Uuid;
 use uuid::uuid;
 
@@ -26,7 +29,7 @@ use crate::state::DownloadState;
 
 #[get("")]
 pub async fn init() -> impl Responder {
-    HttpResponse::Ok().json(serde_json::json!({
+    HttpResponse::Ok().json(json!({
         "success": "true",
         "message":"Torrex API is running"
     }))
@@ -51,12 +54,10 @@ pub async fn initial_download_info_metafile(
         Ok(value) => value,
 
         Err(e) => {
-            return HttpResponse::BadRequest().json({
-                serde_json::json!({
-                    "success": "false",
-                    "message":format!("Failed to read file for given path. Error: {}",e)
-                })
-            });
+            return HttpResponse::BadRequest().json(json!({
+                "success": "false",
+                "message":format!("Failed to read file for given path. Error: {}",e)
+            }));
         }
     };
 
@@ -104,15 +105,13 @@ pub async fn initial_download_info_metafile(
         }
     };
 
-    return HttpResponse::Ok().json({
-        serde_json::json!({
-            "success": "true",
-            "uuid": id.to_string(),
-            "name": name,
-            "length": length.unwrap(),
+    return HttpResponse::Ok().json(json!({
+        "success": "true",
+        "uuid": id.to_string(),
+        "name": name,
+        "length": length.unwrap(),
 
-        })
-    });
+    }));
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,12 +135,11 @@ pub async fn initial_download_info_magnet(
     {
         (Some(url), Some(name)) => (url, name),
         _ => {
-            return HttpResponse::BadRequest().json({
-                serde_json::json!({
+            return HttpResponse::BadRequest().json(
+                json!({
                     "success": "false",
                     "message":format!("Failed to parse the provided link {:?}. Could not parse announce_url or name of the download.", req_body.url)
-                })
-            });
+                }));
         }
     };
 
@@ -149,12 +147,11 @@ pub async fn initial_download_info_magnet(
     let info_hash = if let Ok(info_hash) = hex::decode(info_hash) {
         info_hash
     } else {
-        return HttpResponse::InternalServerError().json({
-            serde_json::json!({
+        return HttpResponse::InternalServerError().json(
+            json!({
                 "success": "false",
                 "message":format!("Failed to decode the info_hash. Please Check your provided url: {}. if incase error persist, feel free to report", req_body.url)
-            })
-        });
+            }));
     };
 
     let peer_id = random::generate_magnet_peerid();
@@ -182,12 +179,11 @@ pub async fn initial_download_info_magnet(
     {
         inf
     } else {
-        return HttpResponse::InternalServerError().json({
-            serde_json::json!({
+        return HttpResponse::InternalServerError().json(
+            json!({
                 "success": "false",
                 "message":format!("Failed to get metadata from handshaking. Please Check your provided url: {}. if incase error persist, feel free to report", req_body.url)
-            })
-        });
+            }));
     };
 
     let (length, _files) = match info.1.key.clone() {
@@ -206,14 +202,12 @@ pub async fn initial_download_info_magnet(
         }
     };
 
-    return HttpResponse::Ok().json({
-        serde_json::json!({
-            "success":"true",
-            "uuid": id.to_string(),
-            "name": name,
-            "length": length.unwrap()
-        })
-    });
+    return HttpResponse::Ok().json(json!({
+        "success":"true",
+        "uuid": id.to_string(),
+        "name": name,
+        "length": length.unwrap()
+    }));
 }
 
 #[derive(Debug, Deserialize)]
@@ -228,7 +222,7 @@ pub async fn start_download(
     state: web::Data<AppState>,
 ) -> impl Responder {
     let Ok(uuid) = Uuid::parse_str(&req_body.uuid) else {
-        return HttpResponse::BadRequest().json(serde_json::json!({
+        return HttpResponse::BadRequest().json(json!({
             "success":"false",
             "message":"Failed to parse uuid to string"
         }));
@@ -238,7 +232,7 @@ pub async fn start_download(
         let state = match state.downloads.lock() {
             Ok(s) => s,
             Err(e) => {
-                return HttpResponse::InternalServerError().json(serde_json::json!({
+                return HttpResponse::InternalServerError().json(json!({
                     "success":"false",
                     "message":format!("Initial download states are not present. Failed to lock the resources {e}")
                 }));
@@ -254,7 +248,7 @@ pub async fn start_download(
                 dl_state.length,
             )
         } else {
-            return HttpResponse::BadRequest().json(serde_json::json!({
+            return HttpResponse::BadRequest().json(json!({
             "success":"false",
             "message":format!("Failed to match the downloading state with provided uuid: {}",uuid)
         }));
@@ -263,63 +257,80 @@ pub async fn start_download(
 
     let temp_dir = std::env::temp_dir();
 
-    match kind {
-        DownloadKind::Magnet((_, info)) => {
-            let mut sm = SwarmManager::init();
-            sm.connect_and_exchange_bitfield(
-                ips,
-                info_hash.to_vec(),
-                self_peer_id.as_bytes().to_vec(),
-            )
-            .await;
+    println!("res spwaned");
 
-            let destination = if let Some(dest) = &req_body.destination {
-                dest.clone()
-            } else {
-                temp_dir
-                    .join(info.name.clone())
-                    .to_string_lossy()
-                    .to_string()
-            };
-
-            sm.destination(destination)
-                .final_peer_msg(length, &info.pieces_hashes(), info.piece_length)
+    actix_web::rt::spawn(async move {
+        match kind {
+            DownloadKind::Magnet((_, info)) => {
+                let mut sm = SwarmManager::init();
+                sm.connect_and_exchange_bitfield(
+                    ips,
+                    info_hash.to_vec(),
+                    self_peer_id.as_bytes().to_vec(),
+                )
                 .await;
-        }
 
-        // To download using the torrent file
-        //
-        //
-        DownloadKind::Meta(meta) => {
-            let mut dm = SwarmManager::init();
+                let destination = if let Some(dest) = &req_body.destination {
+                    dest.clone()
+                } else {
+                    temp_dir
+                        .join(info.name.clone())
+                        .to_string_lossy()
+                        .to_string()
+                };
 
-            dm.connect_and_exchange_bitfield(
-                ips,
-                info_hash.to_vec(),
-                self_peer_id.as_bytes().to_vec(),
-            )
-            .await;
+                sm.destination(destination)
+                    .final_peer_msg(length, &info.pieces_hashes(), info.piece_length)
+                    .await;
+            }
 
-            let destination = if let Some(dest) = &req_body.destination {
-                dest.clone()
-            } else {
-                temp_dir
-                    .join(meta.info.name.clone())
-                    .to_string_lossy()
-                    .to_string()
-            };
+            // To download using the torrent file
+            //
+            //
+            DownloadKind::Meta(meta) => {
+                let mut dm = SwarmManager::init();
 
-            dm.destination(destination)
-                .final_peer_msg(length, &meta.info.pieces_hashes(), meta.info.piece_length)
+                dm.connect_and_exchange_bitfield(
+                    ips,
+                    info_hash.to_vec(),
+                    self_peer_id.as_bytes().to_vec(),
+                )
                 .await;
-        }
-    }
 
-    return HttpResponse::Ok().json({
-        serde_json::json!({
-            "success": "true",
-            "uuid":uuid.to_string(),
-            "message": "Download has been started"
-        });
+                let destination = if let Some(dest) = &req_body.destination {
+                    dest.clone()
+                } else {
+                    temp_dir
+                        .join(meta.info.name.clone())
+                        .to_string_lossy()
+                        .to_string()
+                };
+
+                dm.destination(destination)
+                    .final_peer_msg(length, &meta.info.pieces_hashes(), meta.info.piece_length)
+                    .await;
+            }
+        }
     });
+
+    println!("res end");
+    return HttpResponse::Ok().json(json!({
+        "success": "true",
+        "uuid":uuid.to_string(),
+        "message": "Download has been started"
+    }));
+}
+
+#[get("/ws/download/{uuid}")]
+async fn download_progress(
+    req: HttpRequest,
+    stream: web::Payload,
+) -> Result<HttpResponse, actix_web::Error> {
+    let (res, mut session, stream) = actix_ws::handle(&req, stream)?;
+
+    let mut stream = stream
+        .aggregate_continuations()
+        .max_continuation_size(2_usize.pow(20));
+
+    Ok(res)
 }

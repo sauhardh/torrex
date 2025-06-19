@@ -3,3 +3,7 @@ resolver = "2"
 members = [ "torrex-api",
     "torrex-lib",
 ]
+
+
+[workspace.dependencies]
+tokio = { version = "1.44.2", features=["full"] }

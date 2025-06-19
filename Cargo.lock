@@ -1887,6 +1887,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "tokio",
  "torrex-lib",
  "uuid",
 ]
