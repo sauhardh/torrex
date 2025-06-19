@@ -1,10 +1,13 @@
 use rand::seq::SliceRandom;
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::fs::File;
 use tokio::io::AsyncSeekExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::Sender;
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -23,16 +26,26 @@ const BLOCK_SIZE: u32 = 16_384;
 #[derive(Debug)]
 pub struct BitFieldInfo {
     pub peer_id: String,
+    /// pieces available on this specific peer (not all peers).
     pub present_pieces: HashSet<u32>,
 }
 
 #[derive(Debug)]
 pub struct PeerConnection {
     pub stream: Arc<Mutex<TcpStream>>,
+    /// It has the info of the peer id and pieces present
     pub bitfield_info: BitFieldInfo,
+    /// for the instance of [`Messages`](crate::connection::message::Messages) struct
     pub message: Arc<Mutex<Messages>>,
+    /// Track what pieces has been allocated to particular peer
     allocated_pieces: HashSet<u32>,
+    /// It stores block data together for particular index
+    ///
+    /// After a size of piece_length has been received, it is saved to the file and cleared from memory.
     block_storage: Arc<RwLock<HashMap<u32, BTreeMap<u32, Vec<u8>>>>>,
+    /// To keep track of size of the block that has been downloaded.
+    ///
+    /// It stores "block size" out of  "piece size" that has been downloaded for a particular index(piece).
     block_book: Arc<RwLock<HashMap<u32, usize>>>,
 }
 
@@ -225,6 +238,11 @@ impl PeerConnection {
         Ok(())
     }
 
+    async fn calculate_download(&self) -> u64 {
+        let book = self.block_book.read().await;
+        book.values().sum::<usize>() as u64
+    }
+
     #[inline]
     async fn check_integrity_and_save(
         &self,
@@ -301,7 +319,7 @@ impl PeerConnection {
             .open(&destination)
             .await?;
 
-        if !flag.clone().is_some_and(|x| x == "download_piece") {
+        if flag.as_deref() != Some("download_piece") {
             file.seek(std::io::SeekFrom::Start((index * piece_len) as u64))
                 .await?;
         }
@@ -313,12 +331,33 @@ impl PeerConnection {
     }
 }
 
+/// Struct to handle the progress infomation that can be passed to the frontend
+#[derive(Debug, Serialize, Default)]
+pub struct Progress {
+    downloaded: u64,
+    download_speed: u64,
+    upload_speed: Option<u64>,
+    peers: u32,
+    status: String,
+    eta: Option<u64>,
+}
+
+/// ---------------------- Swarm Manager ----------------------
+///
+/// A struct to handle the connection between different peers
+
 #[derive(Debug)]
 pub struct SwarmManager {
+    /// Pool of connections for each peer.
     pub connections: Arc<Mutex<Vec<PeerConnection>>>,
+    /// Id of the user as peer.
     self_peer_id: String,
+    /// Path to save the particular file
     destination: String,
+    /// Keeps number of pieces each peer has to download
     peer_pieces: HashMap<String, Vec<u32>>,
+    /// A Sender to send the progress data real time, if incase subscribed.
+    progress_tx: Option<Sender<Progress>>,
 }
 
 impl SwarmManager {
@@ -328,6 +367,7 @@ impl SwarmManager {
             self_peer_id: String::new(),
             destination: String::new(),
             peer_pieces: HashMap::new(),
+            progress_tx: None,
         }
     }
 
@@ -337,7 +377,28 @@ impl SwarmManager {
         self
     }
 
-    async fn magnet_link_exchange(&self) {}
+    /*
+    <Work in Progress>
+    <-----
+    <-----
+    <-----
+     */
+    pub fn subscribe_updates(&mut self, tx: Sender<Progress>) -> &Self {
+        self.progress_tx = Some(tx);
+
+        self
+    }
+
+    async fn get_peers(self) -> u64 {
+        let l = self.connections.lock().await.len() as u64;
+
+        l
+    }
+    /*
+    ----->
+    ----->
+    ----->
+     */
 
     pub async fn connect_and_exchange_bitfield(
         &mut self,

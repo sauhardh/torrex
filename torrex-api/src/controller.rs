@@ -257,10 +257,9 @@ pub async fn start_download(
 
     let temp_dir = std::env::temp_dir();
 
-    println!("res spwaned");
-
     actix_web::rt::spawn(async move {
         match kind {
+            //------To download using the magnet link------
             DownloadKind::Magnet((_, info)) => {
                 let mut sm = SwarmManager::init();
                 sm.connect_and_exchange_bitfield(
@@ -284,9 +283,7 @@ pub async fn start_download(
                     .await;
             }
 
-            // To download using the torrent file
-            //
-            //
+            //------To download using the torrent file------
             DownloadKind::Meta(meta) => {
                 let mut dm = SwarmManager::init();
 
@@ -313,7 +310,6 @@ pub async fn start_download(
         }
     });
 
-    println!("res end");
     return HttpResponse::Ok().json(json!({
         "success": "true",
         "uuid":uuid.to_string(),
