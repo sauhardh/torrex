@@ -25,6 +25,8 @@ async fn main() -> std::io::Result<()> {
 
     let app_state = web::Data::new(AppState {
         downloads: Mutex::new(HashMap::new()),
+        sm: Mutex::new(None),
+        managers: Mutex::new(HashMap::new()),
     });
 
     HttpServer::new(move || {

@@ -6,8 +6,10 @@ use actix_web::post;
 use actix_web::rt;
 use actix_web::web;
 use actix_ws::AggregatedMessage;
+use actix_ws::CloseReason;
 use serde::Deserialize;
 use serde_json::json;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 use uuid::uuid;
 
@@ -43,11 +45,11 @@ struct TorrentFileQuery {
 #[get("/initial_info_metafile")]
 pub async fn initial_download_info_metafile(
     state: web::Data<AppState>,
-    req_body: web::Query<TorrentFileQuery>,
+    query: web::Query<TorrentFileQuery>,
 ) -> impl Responder {
     let id = Uuid::new_v4();
 
-    let file_path = format!("{}", &req_body.filepath.trim_matches('"'));
+    let file_path = format!("{}", &query.filepath.trim_matches('"'));
     let mut meta = TorrentFile::new();
 
     let encoded_data = match meta.read_file(Path::new(&file_path)) {
@@ -122,11 +124,11 @@ struct MagnetLinkQuery {
 #[get("/initial_info_magnet")]
 pub async fn initial_download_info_magnet(
     state: web::Data<AppState>,
-    req_body: web::Query<MagnetLinkQuery>,
+    query: web::Query<MagnetLinkQuery>,
 ) -> impl Responder {
     let id = Uuid::new_v4();
 
-    let mut parser = &mut Parser::new(req_body.url.clone());
+    let mut parser = &mut Parser::new(query.url.clone());
     parser = parser.parse();
 
     let info_hash = &parser.magnet_link.xt.clone();
@@ -138,7 +140,7 @@ pub async fn initial_download_info_magnet(
             return HttpResponse::BadRequest().json(
                 json!({
                     "success": "false",
-                    "message":format!("Failed to parse the provided link {:?}. Could not parse announce_url or name of the download.", req_body.url)
+                    "message":format!("Failed to parse the provided link {:?}. Could not parse announce_url or name of the download.", query.url)
                 }));
         }
     };
@@ -150,7 +152,7 @@ pub async fn initial_download_info_magnet(
         return HttpResponse::InternalServerError().json(
             json!({
                 "success": "false",
-                "message":format!("Failed to decode the info_hash. Please Check your provided url: {}. if incase error persist, feel free to report", req_body.url)
+                "message":format!("Failed to decode the info_hash. Please Check your provided url: {}. if incase error persist, feel free to report", query.url)
             }));
     };
 
@@ -182,7 +184,7 @@ pub async fn initial_download_info_magnet(
         return HttpResponse::InternalServerError().json(
             json!({
                 "success": "false",
-                "message":format!("Failed to get metadata from handshaking. Please Check your provided url: {}. if incase error persist, feel free to report", req_body.url)
+                "message":format!("Failed to get metadata from handshaking. Please Check your provided url: {}. if incase error persist, feel free to report", query.url)
             }));
     };
 
@@ -257,11 +259,12 @@ pub async fn start_download(
 
     let temp_dir = std::env::temp_dir();
 
+    let dm = SwarmManager::init();
+    let mut sm = dm.clone();
     actix_web::rt::spawn(async move {
         match kind {
             //------To download using the magnet link------
             DownloadKind::Magnet((_, info)) => {
-                let mut sm = SwarmManager::init();
                 sm.connect_and_exchange_bitfield(
                     ips,
                     info_hash.to_vec(),
@@ -285,9 +288,7 @@ pub async fn start_download(
 
             //------To download using the torrent file------
             DownloadKind::Meta(meta) => {
-                let mut dm = SwarmManager::init();
-
-                dm.connect_and_exchange_bitfield(
+                sm.connect_and_exchange_bitfield(
                     ips,
                     info_hash.to_vec(),
                     self_peer_id.as_bytes().to_vec(),
@@ -303,12 +304,23 @@ pub async fn start_download(
                         .to_string()
                 };
 
-                dm.destination(destination)
+                sm.destination(destination)
                     .final_peer_msg(length, &meta.info.pieces_hashes(), meta.info.piece_length)
                     .await;
             }
         }
     });
+
+    {
+        if let Ok(mut manager_guard) = state.managers.lock() {
+            if manager_guard.get(&uuid).is_none() {
+                manager_guard.insert(uuid, dm);
+            };
+        }
+
+        // let mut sm_guard = state.sm.lock().unwrap();
+        // *sm_guard = Some(dm);
+    }
 
     return HttpResponse::Ok().json(json!({
         "success": "true",
@@ -321,12 +333,58 @@ pub async fn start_download(
 async fn download_progress(
     req: HttpRequest,
     stream: web::Payload,
+    state: web::Data<AppState>,
+    uuid: web::Path<String>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    let (res, mut session, stream) = actix_ws::handle(&req, stream)?;
+    println!("first");
 
-    let mut stream = stream
-        .aggregate_continuations()
-        .max_continuation_size(2_usize.pow(20));
+    let (res, mut session, _stream) = actix_ws::handle(&req, stream)?;
+
+    let (tx, mut rx) = mpsc::channel(16);
+
+    println!("calling download progress");
+
+    let Ok(uuid) = Uuid::parse_str(&uuid) else {
+        return Ok(HttpResponse::BadRequest().json(json!({
+            "success":"false",
+            "message":"Failed to parse uuid to string"
+        })));
+    };
+
+    {
+        {
+            if let Ok(mut manager_guard) = state.managers.lock() {
+                if let Some(sm) = manager_guard.get_mut(&uuid) {
+                    sm.subscribe_updates(tx);
+                } else {
+                    let _ = session.text("No download in progress");
+                    let _ = session
+                        .close(Some(CloseReason {
+                            code: 1000.into(),
+                            description: Some("No download in progress".into()),
+                        }))
+                        .await;
+                    return Ok(res);
+                };
+            };
+        };
+    }
+
+    actix_web::rt::spawn(async move {
+        while let Some(progress) = rx.recv().await {
+            let msg = serde_json::to_string(&progress).unwrap();
+            if session.text(msg).await.is_err() {
+                break;
+            }
+        }
+
+        let _ = session
+            .close(Some(CloseReason {
+                code: 1001.into(),
+                description: Some("No more progress to send".into()),
+            }))
+            .await;
+    });
 
     Ok(res)
 }

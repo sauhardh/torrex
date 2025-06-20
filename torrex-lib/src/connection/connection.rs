@@ -7,6 +7,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 
 use std::collections::BTreeMap;
@@ -23,14 +25,18 @@ use crate::cryptography::sha1_hash;
 
 const BLOCK_SIZE: u32 = 16_384;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BitFieldInfo {
     pub peer_id: String,
     /// pieces available on this specific peer (not all peers).
     pub present_pieces: HashSet<u32>,
 }
 
-#[derive(Debug)]
+/// ---------------------- PeerConnection ----------------------
+///
+/// This handles the connection and logic for download for each peers.
+
+#[derive(Debug, Clone)]
 pub struct PeerConnection {
     pub stream: Arc<Mutex<TcpStream>>,
     /// It has the info of the peer id and pieces present
@@ -47,6 +53,8 @@ pub struct PeerConnection {
     ///
     /// It stores "block size" out of  "piece size" that has been downloaded for a particular index(piece).
     block_book: Arc<RwLock<HashMap<u32, usize>>>,
+
+    progress_notifier_tx: Option<Sender<()>>,
 }
 
 impl PeerConnection {
@@ -67,7 +75,14 @@ impl PeerConnection {
             allocated_pieces: HashSet::new(),
             block_storage: Arc::new(RwLock::new(HashMap::new())),
             block_book: Arc::new(RwLock::new(HashMap::new())),
+            progress_notifier_tx: None,
         })
+    }
+
+    pub fn include_progress_subscriber(&mut self, progress_tx: Sender<()>) -> &Self {
+        self.progress_notifier_tx = Some(progress_tx);
+
+        self
     }
 
     pub async fn init_handshaking(
@@ -238,11 +253,6 @@ impl PeerConnection {
         Ok(())
     }
 
-    async fn calculate_download(&self) -> u64 {
-        let book = self.block_book.read().await;
-        book.values().sum::<usize>() as u64
-    }
-
     #[inline]
     async fn check_integrity_and_save(
         &self,
@@ -327,6 +337,12 @@ impl PeerConnection {
         file.write_all(&data).await?;
         file.flush().await?;
 
+        // Progress notifer
+        //
+        if let Some(sender) = &self.progress_notifier_tx {
+            sender.send(()).await?;
+        };
+
         Ok(())
     }
 }
@@ -334,19 +350,39 @@ impl PeerConnection {
 /// Struct to handle the progress infomation that can be passed to the frontend
 #[derive(Debug, Serialize, Default)]
 pub struct Progress {
-    downloaded: u64,
+    downloaded: u64, //
     download_speed: u64,
     upload_speed: Option<u64>,
-    peers: u32,
+    peers: u32, //
     status: String,
     eta: Option<u64>,
 }
 
-/// ---------------------- Swarm Manager ----------------------
-///
-/// A struct to handle the connection between different peers
+impl Progress {
+    pub fn new(
+        downloaded: u64,
+        download_speed: u64,
+        upload_speed: Option<u64>,
+        peers: u32,
+        status: String,
+        eta: Option<u64>,
+    ) -> Self {
+        Self {
+            downloaded,
+            download_speed,
+            upload_speed,
+            peers,
+            status,
+            eta,
+        }
+    }
+}
 
-#[derive(Debug)]
+/// ---------------------- SwarmManager ----------------------
+///
+/// This handle the connection between different peers
+
+#[derive(Debug, Clone)]
 pub struct SwarmManager {
     /// Pool of connections for each peer.
     pub connections: Arc<Mutex<Vec<PeerConnection>>>,
@@ -358,6 +394,8 @@ pub struct SwarmManager {
     peer_pieces: HashMap<String, Vec<u32>>,
     /// A Sender to send the progress data real time, if incase subscribed.
     progress_tx: Option<Sender<Progress>>,
+    /// To receive a call from each peers that a progress can be send.
+    notfier_rx: Arc<Mutex<Option<Receiver<()>>>>,
 }
 
 impl SwarmManager {
@@ -368,6 +406,7 @@ impl SwarmManager {
             destination: String::new(),
             peer_pieces: HashMap::new(),
             progress_tx: None,
+            notfier_rx: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -383,17 +422,79 @@ impl SwarmManager {
     <-----
     <-----
      */
+
+    /// To subscribe for the progress updates.
+    ///
+    /// This will send a real time information through channel. A `Sender` must be passed as parameter.
     pub fn subscribe_updates(&mut self, tx: Sender<Progress>) -> &Self {
         self.progress_tx = Some(tx);
 
         self
     }
 
-    async fn get_peers(self) -> u64 {
+    /// Returns the number of peers active.
+    async fn get_peers(&self) -> u64 {
         let l = self.connections.lock().await.len() as u64;
 
         l
     }
+
+    /// Returns the size of data that has been downloaded till now.
+    async fn get_downloaded(&self) -> u64 {
+        let mut piece_progress: HashMap<u32, usize> = HashMap::new();
+
+        let connections = {
+            let lock = self.connections.lock().await;
+            lock.clone()
+        };
+
+        for conn in connections.iter() {
+            for (&piece_idx, &bytes) in conn.block_book.read().await.iter() {
+                piece_progress
+                    .entry(piece_idx)
+                    .and_modify(|b| *b = (*b).max(bytes))
+                    .or_insert(bytes);
+            }
+        }
+
+        piece_progress.values().sum::<usize>() as u64
+    }
+
+    /// Sends [`Progress`] info thorugh the subscribed channel.
+    ///
+    /// Requires a call to [`subscribe_updates()`] beforehand
+    async fn report_progress(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let peers = self.get_peers().await as u32;
+        let downloaded = self.get_downloaded().await;
+
+        let progress = Progress::new(downloaded, 0, Some(0), peers, "status".to_string(), Some(0));
+
+        let tx = self.progress_tx.clone().unwrap();
+        tokio::spawn(async move {
+            if let Err(e) = tx.send(progress).await {
+                eprintln!("Failed to pass the progress through channel. {e}");
+            };
+        });
+
+        Ok(())
+    }
+
+    pub async fn progress_listener(self: Arc<Self>) {
+        let rx = Arc::clone(&self.notfier_rx);
+        let this = Arc::clone(&self);
+
+        tokio::spawn(async move {
+            let mut rx = rx.lock().await;
+            let rx = rx.as_mut().expect("Notifier rx is not set Yet!");
+
+            while let Some(_) = rx.recv().await {
+                if let Err(e) = this.report_progress().await {
+                    eprintln!("Error occured on reporting progress. {e}");
+                };
+            }
+        });
+    }
+
     /*
     ----->
     ----->
@@ -409,10 +510,18 @@ impl SwarmManager {
         let mut tasks = vec![];
         self.self_peer_id = peer_id.iter().map(|b| format!("{:02x}", b)).collect();
 
+        //<< To handle a "ok" call from peer, so that progress can be received and sent
+        let (tx, rx) = mpsc::channel::<()>(1);
+        self.notfier_rx = Arc::new(Mutex::new(Some(rx)));
+
+        //>>
+
         for addr in ip_addr {
             let info_hash = info_hash.clone();
             let self_peer_id = peer_id.clone();
             let connections = Arc::clone(&self.connections);
+
+            let notifier_tx = tx.clone();
 
             tasks.push(tokio::spawn(async move {
                 match PeerConnection::init(addr).await {
@@ -421,6 +530,10 @@ impl SwarmManager {
                             conn.receive_bitfield(handshake.remote_peer_id()).await;
 
                             let mut connections = connections.lock().await;
+
+                            // This is so that each peer can notify--after any progress on download--those progress info are ready to be received.
+                            conn.include_progress_subscriber(notifier_tx);
+
                             connections.push(conn);
                         }
 
@@ -440,6 +553,10 @@ impl SwarmManager {
         for task in tasks {
             let _ = task.await;
         }
+
+        //receiver
+        let this = Arc::new(self.clone());
+        this.progress_listener().await;
     }
 
     #[inline]
