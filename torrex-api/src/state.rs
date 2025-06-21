@@ -3,7 +3,8 @@ use uuid::Uuid;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use torrex_lib::connection::connection::SwarmManager;
+use tokio::sync::mpsc::Receiver;
+use torrex_lib::connection::connection::{Progress, SwarmManager};
 use torrex_lib::extension::magnet_link::ExtendedMetadataExchange;
 use torrex_lib::metainfo;
 use torrex_lib::metainfo::TorrentFile;
@@ -60,14 +61,6 @@ impl DownloadState {
 #[derive(Debug)]
 pub struct AppState {
     pub downloads: Mutex<HashMap<Uuid, DownloadState>>,
-    pub sm: Mutex<Option<SwarmManager>>,
     pub managers: Mutex<HashMap<Uuid, SwarmManager>>,
-}
-
-impl AppState {
-    pub fn include_sm(&mut self, sm: SwarmManager) -> &Self {
-        self.sm = Mutex::from(Some(sm));
-
-        self
-    }
+    pub receiver: Mutex<HashMap<Uuid, Receiver<Progress>>>,
 }

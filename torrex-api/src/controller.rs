@@ -10,6 +10,7 @@ use actix_ws::CloseReason;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
+use torrex_lib::connection::connection::Progress;
 use uuid::Uuid;
 use uuid::uuid;
 
@@ -259,12 +260,36 @@ pub async fn start_download(
 
     let temp_dir = std::env::temp_dir();
 
-    let dm = SwarmManager::init();
-    let mut sm = dm.clone();
+    let sm = SwarmManager::init();
+    let (tx, rx) = mpsc::channel::<Progress>(16);
+
+    {
+        let receiver = state.receiver.lock();
+        if let Ok(mut r) = receiver {
+            if r.get(&uuid).is_none() {
+                r.insert(uuid, rx);
+            }
+        }
+    }
+
+    {
+        if let Ok(mut manager_guard) = state.managers.lock() {
+            if manager_guard.get(&uuid).is_none() {
+                manager_guard.insert(uuid, sm);
+            };
+        }
+    }
+
     actix_web::rt::spawn(async move {
         match kind {
             //------To download using the magnet link------
             DownloadKind::Magnet((_, info)) => {
+                let mut state = state.managers.lock().unwrap();
+                let sm = state.get_mut(&uuid).unwrap();
+
+                // subscribe for updates
+                let sm = sm.subscribe_updates(tx);
+
                 sm.connect_and_exchange_bitfield(
                     ips,
                     info_hash.to_vec(),
@@ -288,6 +313,12 @@ pub async fn start_download(
 
             //------To download using the torrent file------
             DownloadKind::Meta(meta) => {
+                let mut state = state.managers.lock().unwrap();
+                let sm = state.get_mut(&uuid).unwrap();
+
+                // subscribe for updates
+                let sm = sm.subscribe_updates(tx);
+
                 sm.connect_and_exchange_bitfield(
                     ips,
                     info_hash.to_vec(),
@@ -311,17 +342,6 @@ pub async fn start_download(
         }
     });
 
-    {
-        if let Ok(mut manager_guard) = state.managers.lock() {
-            if manager_guard.get(&uuid).is_none() {
-                manager_guard.insert(uuid, dm);
-            };
-        }
-
-        // let mut sm_guard = state.sm.lock().unwrap();
-        // *sm_guard = Some(dm);
-    }
-
     return HttpResponse::Ok().json(json!({
         "success": "true",
         "uuid":uuid.to_string(),
@@ -336,13 +356,7 @@ async fn download_progress(
     state: web::Data<AppState>,
     uuid: web::Path<String>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    println!("first");
-
     let (res, mut session, _stream) = actix_ws::handle(&req, stream)?;
-
-    let (tx, mut rx) = mpsc::channel(16);
-
-    println!("calling download progress");
 
     let Ok(uuid) = Uuid::parse_str(&uuid) else {
         return Ok(HttpResponse::BadRequest().json(json!({
@@ -351,24 +365,25 @@ async fn download_progress(
         })));
     };
 
-    {
-        {
-            if let Ok(mut manager_guard) = state.managers.lock() {
-                if let Some(sm) = manager_guard.get_mut(&uuid) {
-                    sm.subscribe_updates(tx);
-                } else {
-                    let _ = session.text("No download in progress");
-                    let _ = session
-                        .close(Some(CloseReason {
-                            code: 1000.into(),
-                            description: Some("No download in progress".into()),
-                        }))
-                        .await;
-                    return Ok(res);
-                };
-            };
-        };
-    }
+    let rx_opt = {
+        if let Ok(mut receiver) = state.receiver.lock() {
+            receiver.remove(&uuid)
+        } else {
+            None
+        }
+    };
+
+    let Some(mut rx) = rx_opt else {
+        let _ = session.text("Download not in progress").await;
+        let _ = session
+            .close(Some(CloseReason {
+                code: 1000.into(),
+                description: Some("No download in progress".into()),
+            }))
+            .await;
+
+        return Ok(res);
+    };
 
     actix_web::rt::spawn(async move {
         while let Some(progress) = rx.recv().await {
@@ -378,12 +393,12 @@ async fn download_progress(
             }
         }
 
-        let _ = session
-            .close(Some(CloseReason {
-                code: 1001.into(),
-                description: Some("No more progress to send".into()),
-            }))
-            .await;
+        // let _ = session
+        //     .close(Some(CloseReason {
+        //         code: 1001.into(),
+        //         description: Some("No more progress to send".into()),
+        //     }))
+        //     .await;
     });
 
     Ok(res)

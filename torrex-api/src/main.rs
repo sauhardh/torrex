@@ -14,6 +14,7 @@ use controller::initial_download_info_magnet;
 use controller::initial_download_info_metafile;
 use state::AppState;
 
+use crate::controller::download_progress;
 use crate::controller::init;
 use crate::controller::start_download;
 
@@ -25,8 +26,8 @@ async fn main() -> std::io::Result<()> {
 
     let app_state = web::Data::new(AppState {
         downloads: Mutex::new(HashMap::new()),
-        sm: Mutex::new(None),
         managers: Mutex::new(HashMap::new()),
+        receiver: Mutex::new(HashMap::new()),
     });
 
     HttpServer::new(move || {
@@ -37,7 +38,8 @@ async fn main() -> std::io::Result<()> {
                     .service(init)
                     .service(initial_download_info_magnet)
                     .service(initial_download_info_metafile)
-                    .service(start_download),
+                    .service(start_download)
+                    .service(download_progress),
             )
             .wrap(middleware::NormalizePath::trim())
             .wrap(middleware::Logger::default())

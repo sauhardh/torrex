@@ -416,17 +416,11 @@ impl SwarmManager {
         self
     }
 
-    /*
-    <Work in Progress>
-    <-----
-    <-----
-    <-----
-     */
-
+    ///<----- Functionality related to real time progress updates.
     /// To subscribe for the progress updates.
     ///
     /// This will send a real time information through channel. A `Sender` must be passed as parameter.
-    pub fn subscribe_updates(&mut self, tx: Sender<Progress>) -> &Self {
+    pub fn subscribe_updates(&mut self, tx: Sender<Progress>) -> &mut Self {
         self.progress_tx = Some(tx);
 
         self
@@ -469,7 +463,10 @@ impl SwarmManager {
 
         let progress = Progress::new(downloaded, 0, Some(0), peers, "status".to_string(), Some(0));
 
+        // Security: Could panic if tx is not set prior to calling this function
+        // TODO: need to handle it more gracefully.
         let tx = self.progress_tx.clone().unwrap();
+
         tokio::spawn(async move {
             if let Err(e) = tx.send(progress).await {
                 eprintln!("Failed to pass the progress through channel. {e}");
@@ -494,12 +491,7 @@ impl SwarmManager {
             }
         });
     }
-
-    /*
-    ----->
-    ----->
-    ----->
-     */
+    //----->
 
     pub async fn connect_and_exchange_bitfield(
         &mut self,
@@ -511,7 +503,7 @@ impl SwarmManager {
         self.self_peer_id = peer_id.iter().map(|b| format!("{:02x}", b)).collect();
 
         //<< To handle a "ok" call from peer, so that progress can be received and sent
-        let (tx, rx) = mpsc::channel::<()>(1);
+        let (tx, rx) = mpsc::channel::<()>(16);
         self.notfier_rx = Arc::new(Mutex::new(Some(rx)));
 
         //>>

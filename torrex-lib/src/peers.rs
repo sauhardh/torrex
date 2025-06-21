@@ -123,8 +123,6 @@ impl Peers {
         Self::default()
     }
 
-    /// Flag = "response" if using .torrent file.
-    /// Flag = "magnet" will mark it as magnet link request.
     pub async fn request_tracker(&mut self, params: &RequestParams) -> &Self {
         let client = reqwest::Client::new();
         let mut url = reqwest::Url::parse(&self.announce_url).unwrap();
@@ -150,11 +148,33 @@ impl Peers {
                 .append_pair("event", &format!("{:?}", event));
         }
 
-        let res_body = client.get(url).send().await.unwrap().bytes().await.unwrap();
+        let res_body = match client.get(url).send().await {
+            Ok(res) => match res.bytes().await {
+                Ok(bytes) => Some(bytes),
+                Err(e) => {
+                    eprintln!("Failed to read response body: {e}");
+                    None
+                }
+            },
+            Err(e) => {
+                eprintln!(
+                    "Failed to get url requested. Currently it only supports for HTTP connection. Please check your url again: {e}"
+                );
+                None
+            }
+        };
 
-        self.response = Some(
-            serde_json::from_value::<ResponseParams>(Bencode::new().decoder(&res_body).0).unwrap(),
-        );
+        if let Some(body) = res_body {
+            if let Ok(parsed) =
+                serde_json::from_value::<ResponseParams>(Bencode::new().decoder(&body).0)
+            {
+                self.response = Some(parsed);
+            } else {
+                eprintln!("Failed to parse response bencoded value to ResponseParams");
+            }
+        } else {
+            eprintln!("Tracker request failed, response body is empty");
+        }
 
         self
     }
