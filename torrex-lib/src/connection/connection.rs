@@ -1,5 +1,4 @@
 use rand::seq::SliceRandom;
-use serde::Deserialize;
 use serde::Serialize;
 use tokio::fs::File;
 use tokio::io::AsyncSeekExt;
@@ -416,8 +415,9 @@ impl SwarmManager {
         self
     }
 
-    ///<----- Functionality related to real time progress updates.
-    /// To subscribe for the progress updates.
+    //<<----- Functionality related to real time progress updates.
+    ///
+    /// To subscribe for the progress updates. Must be called right after initialization of  [`SwarmManager`] struct.
     ///
     /// This will send a real time information through channel. A `Sender` must be passed as parameter.
     pub fn subscribe_updates(&mut self, tx: Sender<Progress>) -> &mut Self {
@@ -463,10 +463,12 @@ impl SwarmManager {
 
         let progress = Progress::new(downloaded, 0, Some(0), peers, "status".to_string(), Some(0));
 
-        // Security: Could panic if tx is not set prior to calling this function
-        // TODO: need to handle it more gracefully.
+        // Spwan a task only if progress_tx is available.
+        // User has to first subcribe for updates and pass the tx(Sender)
+        //
+        // Security: progress_tx is expected to be there. As this function is called if and only if tx is present.
+        // else, panic may occur
         let tx = self.progress_tx.clone().unwrap();
-
         tokio::spawn(async move {
             if let Err(e) = tx.send(progress).await {
                 eprintln!("Failed to pass the progress through channel. {e}");
@@ -491,7 +493,7 @@ impl SwarmManager {
             }
         });
     }
-    //----->
+    //----->>
 
     pub async fn connect_and_exchange_bitfield(
         &mut self,
@@ -546,9 +548,12 @@ impl SwarmManager {
             let _ = task.await;
         }
 
-        //receiver
-        let this = Arc::new(self.clone());
-        this.progress_listener().await;
+        // To receive a call from PeerConnection, to send the progress info through the channel.
+        // User has to first subcribe for updates and pass the tx(Sender)
+        if self.progress_tx.clone().is_some() {
+            let this = Arc::new(self.clone());
+            this.progress_listener().await;
+        }
     }
 
     #[inline]

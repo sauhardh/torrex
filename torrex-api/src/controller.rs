@@ -3,16 +3,13 @@ use actix_web::HttpResponse;
 use actix_web::Responder;
 use actix_web::get;
 use actix_web::post;
-use actix_web::rt;
 use actix_web::web;
-use actix_ws::AggregatedMessage;
 use actix_ws::CloseReason;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
 use torrex_lib::connection::connection::Progress;
 use uuid::Uuid;
-use uuid::uuid;
 
 use std::path::Path;
 
@@ -20,7 +17,6 @@ use torrex_lib::connection::connection::SwarmManager;
 use torrex_lib::extension::magnet_link::ExtendedExchange;
 use torrex_lib::extension::magnet_link::ExtendedMetadataExchange;
 use torrex_lib::extension::magnet_link::Parser;
-use torrex_lib::metainfo;
 use torrex_lib::metainfo::FileKey;
 use torrex_lib::metainfo::TorrentFile;
 use torrex_lib::peers::Peers;
