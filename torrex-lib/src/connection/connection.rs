@@ -1,6 +1,7 @@
 use rand::seq::SliceRandom;
 use serde::Serialize;
 use tokio::fs::File;
+use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -13,14 +14,20 @@ use tokio::sync::mpsc::Sender;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::error;
 use std::net::SocketAddrV4;
 use std::ops::DerefMut;
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::connection::download::DownloadCommand;
+use crate::connection::download::DownloadManager;
+use crate::connection::download::DownloadState;
 use crate::connection::handshake::Handshake;
 use crate::connection::message::MessageType;
 use crate::connection::message::Messages;
 use crate::cryptography::sha1_hash;
+use crate::utils::config::config_dir;
 
 const BLOCK_SIZE: u32 = 16_384;
 
@@ -337,7 +344,7 @@ impl PeerConnection {
         file.flush().await?;
 
         // Progress notifer
-        //
+        // This sends as a notifier to the receiver, so that the receiver can now start to send a progress info to its receiver.
         if let Some(sender) = &self.progress_notifier_tx {
             sender.send(()).await?;
         };
@@ -389,12 +396,27 @@ pub struct SwarmManager {
     self_peer_id: String,
     /// Path to save the particular file
     destination: String,
+    /// Info hash of the current download
+    info_hash: String,
     /// Keeps number of pieces each peer has to download
     peer_pieces: HashMap<String, Vec<u32>>,
+    /// This is to keep track of the downloaded pieces.
+    completed_pieces: Arc<RwLock<HashSet<u32>>>,
     /// A Sender to send the progress data real time, if incase subscribed.
     progress_tx: Option<Sender<Progress>>,
     /// To receive a call from each peers that a progress can be send.
     notfier_rx: Arc<Mutex<Option<Receiver<()>>>>,
+    /// Download state of the current downloading
+    // dl_state: Arc<RwLock<DownloadState>>,
+    // /// A Sender to control the Download State
+    // ///
+    // /// A [`DownloadCommand`] is passed through the channel by this sender.
+    // control_tx: Arc<Mutex<Option<Sender<DownloadCommand>>>>,
+    // /// A receiver to control the Download State
+    // ///
+    // /// A [DownloadCommand] received by this Receiver is to be reflected in the downlaod state and the nature of download
+    // control_rx: Arc<Mutex<Option<Receiver<DownloadCommand>>>>,
+    download_manager: Arc<Mutex<DownloadManager>>,
 }
 
 impl SwarmManager {
@@ -404,8 +426,16 @@ impl SwarmManager {
             self_peer_id: String::new(),
             destination: String::new(),
             peer_pieces: HashMap::new(),
+            info_hash: String::new(),
+            completed_pieces: Arc::new(RwLock::new(HashSet::new())),
+            // For real time progress
             progress_tx: None,
             notfier_rx: Arc::new(Mutex::new(None)),
+            // Download state
+            // dl_state: Arc::new(RwLock::new(DownloadState::Initialized)),
+            // control_tx: Arc::new(Mutex::new(None)),
+            // control_rx: Arc::new(Mutex::new(None)),
+            download_manager: Arc::new(Mutex::new(DownloadManager::new())),
         }
     }
 
@@ -495,6 +525,147 @@ impl SwarmManager {
     }
     //----->>
 
+    //<<----- Functionality related to Download manager
+    // #[inline]
+    // async fn update_state_downloading(&self) {
+    //     let mut state = self.dl_state.write().await;
+    //     *state = DownloadState::Downloading;
+    // }
+
+    // #[inline]
+    // async fn update_state_completed(&self) {
+    //     let mut state = self.dl_state.write().await;
+    //     *state = DownloadState::Completed;
+    // }
+
+    // #[inline]
+    // async fn update_state_paused(&self) {
+    //     let mut state = self.dl_state.write().await;
+    //     *state = DownloadState::Paused;
+    // }
+
+    // #[inline]
+    // async fn update_state_stopped(&self) {
+    //     let mut state = self.dl_state.write().await;
+    //     *state = DownloadState::Stopped;
+    // }
+
+    // #[inline]
+    // async fn update_state_error(&self) {
+    //     let mut state = self.dl_state.write().await;
+    //     *state = DownloadState::Error;
+    // }
+
+    // #[inline]
+    // async fn get_download_state(&self) -> DownloadState {
+    //     let state = self.dl_state.read().await;
+    //     state.clone()
+    // }
+
+    // /// A function to subscribe to get support for download manager
+    // ///
+    // /// Feature includes download, pause, resume
+    // ///
+    // /// However download is by default and it will start even if subscribe is not called
+    // pub async fn subscribe_downloadmanager(&self) -> &Self {
+    //     let (sender, receiver) = mpsc::channel::<DownloadCommand>(2);
+    //     {
+    //         let mut control_tx = self.control_tx.lock().await;
+    //         *control_tx = Some(sender);
+    //     }
+
+    //     {
+    //         let mut control_rx = self.control_rx.lock().await;
+    //         *control_rx = Some(receiver);
+    //     }
+
+    //     self
+    // }
+
+    // /// To pause the download
+    // pub async fn pause(&self) -> Result<(), Box<dyn std::error::Error>> {
+    //     let state = self.get_download_state().await;
+    //     if state == DownloadState::Paused {
+    //         return Ok(());
+    //     }
+
+    //     if let Some(control_tx) = self.control_tx.lock().await.clone() {
+    //         control_tx.send(DownloadCommand::Pause).await?;
+    //     };
+
+    //     self.update_state_paused().await;
+
+    //     Ok(())
+    // }
+
+    // /// To resume the download
+    // pub async fn resume(&self) -> Result<(), Box<dyn std::error::Error>> {
+    //     let state = self.get_download_state().await;
+    //     if state == DownloadState::Downloading {
+    //         return Ok(());
+    //     }
+
+    //     if let Some(control_tx) = self.control_tx.lock().await.clone() {
+    //         control_tx.send(DownloadCommand::Resume).await?;
+    //     }
+
+    //     self.update_state_downloading().await;
+
+    //     Ok(())
+    // }
+
+    // /// To stop the download
+    // pub async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    //     let state = self.get_download_state().await;
+    //     if state == DownloadState::Stopped {
+    //         return Ok(());
+    //     }
+
+    //     if let Some(control_tx) = self.control_tx.lock().await.clone() {
+    //         control_tx.send(DownloadCommand::Stop).await?;
+    //     }
+
+    //     self.update_state_stopped().await;
+
+    //     Ok(())
+    // }
+
+    /// A function to subscribe to get support for download manager
+    ///
+    /// Feature includes download, pause, resume
+    ///
+    /// However download is by default and it will start even if subscribe is not called
+    pub async fn subscribe_downloadmanager(&self) -> &Self {
+        let (sender, receiver) = mpsc::channel::<DownloadCommand>(2);
+        {
+            let dm = self.download_manager.lock().await;
+            let mut control_tx = dm.control_tx.lock().await;
+            *control_tx = Some(sender);
+        }
+
+        {
+            let dm = self.download_manager.lock().await;
+            let mut control_rx = dm.control_rx.lock().await;
+            *control_rx = Some(receiver);
+        }
+
+        self
+    }
+
+    async fn get_torrex_dir(&self, filename: String) -> Result<PathBuf, Box<dyn error::Error>> {
+        let path = config_dir("torrex").join(format!("{}.json", filename));
+
+        if !path.exists() {
+            File::create(path.clone()).await?;
+        } else {
+            return Err("Could not find the requested file/dir in the given path".into());
+        }
+
+        Ok(path)
+    }
+
+    //----->>
+
     pub async fn connect_and_exchange_bitfield(
         &mut self,
         ip_addr: Vec<String>,
@@ -507,7 +678,6 @@ impl SwarmManager {
         //<< To handle a "ok" call from peer, so that progress can be received and sent
         let (tx, rx) = mpsc::channel::<()>(16);
         self.notfier_rx = Arc::new(Mutex::new(Some(rx)));
-
         //>>
 
         for addr in ip_addr {
@@ -554,6 +724,8 @@ impl SwarmManager {
             let this = Arc::new(self.clone());
             this.progress_listener().await;
         }
+
+        self.info_hash = info_hash.iter().map(|b| format!("{:02X}", b)).collect()
     }
 
     #[inline]
@@ -621,16 +793,30 @@ impl SwarmManager {
         let total_pieces = (file_size + piece_len - 1) / piece_len;
 
         //<< For Passing through asynchronous task.
-        let completed_pieces: Arc<RwLock<HashSet<u32>>> = Arc::new(RwLock::new(HashSet::new()));
-        let unchoked_peers: Arc<RwLock<HashSet<String>>> = Arc::new(RwLock::new(HashSet::new()));
-        let working_pieces: Arc<RwLock<HashSet<u32>>> = Arc::new(RwLock::new(HashSet::new()));
+        let completed_pieces = Arc::clone(&self.completed_pieces);
+        let unchoked_peers = Arc::new(RwLock::new(HashSet::new()));
+        let working_pieces = Arc::new(RwLock::new(HashSet::new()));
 
         let mut tasks = Vec::new();
 
         let destination = Arc::new(self.destination.clone());
         let pieces = Arc::new(pieces.clone());
         let connections = self.connections.clone();
+        let info_hash = self.info_hash.clone();
+        let peer_pieces = self.peer_pieces.clone();
         //>>
+
+        // Download Manager
+        // Mark state as initialzied downloading
+        // self.update_state_downloading().await;
+        let download_manager = Arc::clone(&self.download_manager);
+        {
+            download_manager
+                .lock()
+                .await
+                .update_state_downloading()
+                .await;
+        }
 
         for (peer, indexes) in &self.peer_pieces {
             let connections = Arc::clone(&connections);
@@ -643,8 +829,59 @@ impl SwarmManager {
             let indexes = indexes.clone();
             let peer = peer.clone();
 
+            let info_hash = self.info_hash.clone();
+            let peer_pieces = self.peer_pieces.clone();
+
+            let download_manager = Arc::clone(&self.download_manager);
+
             tasks.push(tokio::spawn(async move {
                 for index in indexes {
+                    let dl_state = { download_manager.lock().await.dl_state.read().await.clone() };
+
+                    match dl_state {
+                        DownloadState::Paused => {
+                            // Save download state
+                            // wait
+                        }
+                        DownloadState::Resumed => {
+                            // load download state
+                            // start download
+                            // update state to downloading
+                            {
+                                let dm = download_manager.lock().await;
+                                let mut state = dm.dl_state.write().await;
+                                *state = DownloadState::Downloading;
+                            }
+                        }
+                        DownloadState::Stopped => {
+                            // Save download state
+                            let dm = download_manager.lock().await;
+                            if let Err(e) = dm
+                                .save_download_state(
+                                    completed_pieces.read().await.clone(),
+                                    destination.to_string(),
+                                    info_hash,
+                                    peer_pieces,
+                                )
+                                .await
+                            {
+                                *dm.dl_state.write().await = DownloadState::Error;
+                                eprintln!("Error occured while saving downloads state. More: {e}");
+                            };
+
+                            return;
+                        }
+
+                        DownloadState::Completed => return,
+                        DownloadState::Error => {
+                            eprintln!("DownloadState has an error.");
+                        }
+
+                        // This is for `DownloadState::Downloading` and `DownloadState::Initialized`
+                        // No need to interfere in such state.
+                        _ => {}
+                    }
+
                     let pieces_completed_or_downloading = {
                         let completed = completed_pieces.read().await;
                         let mut working = working_pieces.write().await;
@@ -672,8 +909,10 @@ impl SwarmManager {
                         };
                         if should_unchoke {
                             let mut message = conn.message.lock().await;
+                            // Send interested message
                             message.interested().await;
 
+                            // Wait for unchoke. right after sending interested message
                             if !message.wait_unchoke().await {
                                 if !message.wait_unchoke().await {
                                     eprintln!("Peer {} did not unchoke, skipping", peer);
@@ -689,6 +928,7 @@ impl SwarmManager {
                             piece_len
                         };
 
+                        // Downlaod blocks of each pieces
                         if let Err(e) = conn
                             .download_piece_blocks(
                                 index,
@@ -722,6 +962,13 @@ impl SwarmManager {
                 eprintln!("Task failed: {e}");
             }
         }
+
+        // Download Manager
+        // Mark state as completed
+        // self.update_state_completed().await;
+        {
+            download_manager.lock().await.update_state_completed().await;
+        }
     }
 }
 
@@ -734,6 +981,7 @@ mod test_connection {
     use crate::peers::Peers;
     use crate::utils::random;
 
+    use std::env::temp_dir;
     use std::path::Path;
 
     #[tokio::test]
@@ -783,7 +1031,8 @@ mod test_connection {
         )
         .await;
 
-        dm.destination("/tmp/testing.txt".to_string())
+        let path = temp_dir().join("testing.txt").to_string_lossy().to_string();
+        dm.destination(path)
             .final_peer_msg(
                 length.unwrap().clone(),
                 &meta.info.pieces_hashes(),
