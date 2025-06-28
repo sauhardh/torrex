@@ -138,9 +138,18 @@ impl Bencode {
             }
 
             other => {
-                panic!("Error occured on bencode parsing. Unhandled byte: {other}");
+                println!("Error occured on bencode parsing. Unhandled byte: {other}");
+                (serde_json::Value::Null, &encoded_value[1..])
             }
         }
+    }
+
+    pub fn decoder_with_len<'a>(&'a self, encoded_value: &'a [u8]) -> (Value, usize) {
+        let original_len = encoded_value.len();
+        let (value, rest) = self.decoder(encoded_value);
+        let consumed = original_len - rest.len();
+
+        (value, consumed)
     }
 }
 

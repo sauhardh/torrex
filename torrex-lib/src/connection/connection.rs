@@ -1,28 +1,28 @@
 use rand::seq::SliceRandom;
 use serde::Serialize;
 use tokio::fs::File;
-use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
+use tokio::time::timeout;
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::error;
-use std::net::SocketAddrV4;
 use std::ops::DerefMut;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::connection::download::DownloadCommand;
 use crate::connection::download::DownloadManager;
-use crate::connection::download::DownloadState;
 use crate::connection::handshake::Handshake;
 use crate::connection::message::MessageType;
 use crate::connection::message::Messages;
@@ -65,10 +65,25 @@ pub struct PeerConnection {
 
 impl PeerConnection {
     pub async fn init(addr: String) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let addr = addr.parse::<SocketAddrV4>()?;
-        let stream = TcpStream::connect(addr).await?;
-        let arc_stream = Arc::new(Mutex::new(stream));
+        let stream_result = timeout(Duration::from_secs(280), async {
+            TcpStream::connect(addr.clone()).await
+        })
+        .await;
 
+        let stream = if let Ok(stream) = stream_result {
+            match stream {
+                Ok(stream) => stream,
+                Err(e) => {
+                    eprintln!("Failed to connect to {addr}: {e}");
+                    return Err("Failed to establish tcp connection".into());
+                }
+            }
+        } else {
+            eprintln!("Timeout while connecting to {addr}");
+            return Err("timeout while establishing tcp connection".into());
+        };
+
+        let arc_stream = Arc::new(Mutex::new(stream));
         let message = Arc::new(Mutex::new(Messages::init(arc_stream.clone())));
 
         Ok(Self {
@@ -106,7 +121,23 @@ impl PeerConnection {
         handshake.handshake_reply(&mut stream).await
     }
 
-    pub async fn receive_bitfield(&mut self, peer_id: String) {
+    pub async fn receive_have(&mut self, peer_id: String) -> bool {
+        let output = {
+            let mut message = self.message.lock().await;
+            message.wait_have().await
+        };
+
+        if let Some(payload) = output {
+            self.bitfield_info.peer_id = peer_id;
+            self.bitfield_info.present_pieces.insert(payload);
+
+            return true;
+        };
+
+        false
+    }
+
+    pub async fn receive_bitfield(&mut self, peer_id: String) -> bool {
         let output = {
             let mut message = self.message.lock().await;
             message.wait_bitfield().await
@@ -115,7 +146,34 @@ impl PeerConnection {
         if let Some(payload) = output {
             self.bitfield_info.peer_id = peer_id;
             self.bitfield_info.present_pieces = payload.into();
+
+            return true;
         };
+
+        false
+    }
+
+    #[inline]
+    pub async fn send_request(
+        &self,
+        index: u32,
+        length: usize,
+        begin: usize,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut msg: Vec<u8> = Vec::with_capacity(17);
+        // Message length: 13 bytes of Payload (index, begin, length) + 1 bytes of message Id
+        msg.extend(&13u32.to_be_bytes());
+        // Message Id: 6 for `request` message type.
+        msg.push(6);
+        // Payload: (index, begin, length) each as 4 bytes.
+        msg.extend(&(index).to_be_bytes());
+        msg.extend(&(begin as u32).to_be_bytes());
+        msg.extend(&(length as u32).to_be_bytes());
+
+        let mut stream = self.stream.lock().await;
+        stream.write_all(&msg).await?;
+
+        Ok(())
     }
 
     async fn request_piece_block(
@@ -124,7 +182,6 @@ impl PeerConnection {
         actual_piece_length: usize,
         total_blocks: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let message: Arc<Mutex<Messages>> = Arc::clone(&self.message);
 
         for block_idx in 0..total_blocks {
             let begin = block_idx * BLOCK_SIZE as usize;
@@ -135,9 +192,7 @@ impl PeerConnection {
                 actual_piece_length - begin
             };
 
-            if let Err(e) = message
-                .lock()
-                .await
+            if let Err(e) = self
                 .send_request(index, block_length, begin)
                 .await
             {
@@ -155,14 +210,8 @@ impl PeerConnection {
         actual_piece_length: usize,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         let mut received_blocks = 0;
-        let start_time = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(30);
 
         while received_blocks < total_blocks {
-            if start_time.elapsed() > timeout {
-                return Err("Timeout waiting for piece".into());
-            }
-
             let output = {
                 let mut message = self.message.lock().await;
                 message.wait_piece_block().await
@@ -202,8 +251,9 @@ impl PeerConnection {
                             return Ok(true);
                         }
                     }
-                    _ => {
-                        eprintln!("Error: >> Expected only Piece type block. ");
+                    other => {
+                        eprintln!("Error: >> Expected only Piece type block. Got {other:?}");
+                        continue;
                     }
                 }
             }
@@ -223,40 +273,51 @@ impl PeerConnection {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let total_blocks = (actual_piece_length + BLOCK_SIZE as usize - 1) / BLOCK_SIZE as usize;
 
+        if !self.bitfield_info.present_pieces.contains(&index) {
+            eprintln!("This particular index {index} is not associated with this peer.");
+            return Ok(());
+        }
+
+        // Send piece requests
         if let Err(e) = self
             .request_piece_block(index, actual_piece_length, total_blocks)
             .await
         {
             eprintln!(
-                "Error occured while requesting a piece block of index {index}. FurtherMore {e}"
+                "Error occurred while requesting a piece block of index {index}. FurtherMore {e}"
             );
-        };
-
-        // Listen for responses
-        if let Ok(is_complete) = self
-            .receive_piece_block(total_blocks, actual_piece_length)
-            .await
-        {
-            if is_complete {
-                if let Err(e) = self
-                    .check_integrity_and_save(
-                        index,
-                        pieces,
-                        destination,
-                        piece_len,
-                        actual_piece_length,
-                        &flag,
-                    )
-                    .await
-                {
-                    eprintln!(
-                        "Error occured while calling for integrity checking and saving to file. FurtherMore: {e}"
-                    )
-                };
-            }
+            return Err(format!("error: {e}").into());
         }
 
-        Ok(())
+
+        // Listen for responses with better error handling
+        match self.receive_piece_block(total_blocks, actual_piece_length).await {
+            Ok(is_complete) => {
+                if is_complete {
+                    if let Err(e) = self
+                        .check_integrity_and_save(
+                            index,
+                            pieces,
+                            destination,
+                            piece_len,
+                            actual_piece_length,
+                            &flag,
+                        )
+                        .await
+                    {
+                        eprintln!(
+                            "Error occurred while calling for integrity checking and saving to file. FurtherMore: {e}"
+                        );
+                        return Err(e);
+                    }
+                }
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("Error receiving piece blocks: {}", e);
+                Err(e)
+            }
+        }
     }
 
     #[inline]
@@ -306,8 +367,8 @@ impl PeerConnection {
                 {
                     eprintln!("Failed to save to file for index {index}. FurtherMore: {e}");
                 };
+                println!("Saved to destination for index: {index}");
 
-                println!("Downlaod Successfull, Path: {destination} for index {index}");
                 return Ok(());
             } else {
                 return Err("SHA-1 mismatch".into());
@@ -336,12 +397,14 @@ impl PeerConnection {
             .await?;
 
         if flag.as_deref() != Some("download_piece") {
-            file.seek(std::io::SeekFrom::Start((index * piece_len) as u64))
+            file.seek(std::io::SeekFrom::Start(index as u64 * piece_len as u64))
                 .await?;
         }
 
         file.write_all(&data).await?;
         file.flush().await?;
+
+        println!("written.");
 
         // Progress notifer
         // This sends as a notifier to the receiver, so that the receiver can now start to send a progress info to its receiver.
@@ -351,6 +414,8 @@ impl PeerConnection {
 
         Ok(())
     }
+
+  
 }
 
 /// Struct to handle the progress infomation that can be passed to the frontend
@@ -406,17 +471,10 @@ pub struct SwarmManager {
     progress_tx: Option<Sender<Progress>>,
     /// To receive a call from each peers that a progress can be send.
     notfier_rx: Arc<Mutex<Option<Receiver<()>>>>,
-    /// Download state of the current downloading
-    // dl_state: Arc<RwLock<DownloadState>>,
-    // /// A Sender to control the Download State
-    // ///
-    // /// A [`DownloadCommand`] is passed through the channel by this sender.
-    // control_tx: Arc<Mutex<Option<Sender<DownloadCommand>>>>,
-    // /// A receiver to control the Download State
-    // ///
-    // /// A [DownloadCommand] received by this Receiver is to be reflected in the downlaod state and the nature of download
-    // control_rx: Arc<Mutex<Option<Receiver<DownloadCommand>>>>,
-    download_manager: Arc<Mutex<DownloadManager>>,
+    /// Download manager of the current downloading
+    pub download_manager: Arc<Mutex<DownloadManager>>,
+
+    pub unchoked_peers: Arc<RwLock<HashSet<String>>>,
 }
 
 impl SwarmManager {
@@ -432,10 +490,9 @@ impl SwarmManager {
             progress_tx: None,
             notfier_rx: Arc::new(Mutex::new(None)),
             // Download state
-            // dl_state: Arc::new(RwLock::new(DownloadState::Initialized)),
-            // control_tx: Arc::new(Mutex::new(None)),
-            // control_rx: Arc::new(Mutex::new(None)),
             download_manager: Arc::new(Mutex::new(DownloadManager::new())),
+
+            unchoked_peers: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -445,8 +502,6 @@ impl SwarmManager {
         self
     }
 
-    //<<----- Functionality related to real time progress updates.
-    ///
     /// To subscribe for the progress updates. Must be called right after initialization of  [`SwarmManager`] struct.
     ///
     /// This will send a real time information through channel. A `Sender` must be passed as parameter.
@@ -523,119 +578,13 @@ impl SwarmManager {
             }
         });
     }
-    //----->>
-
-    //<<----- Functionality related to Download manager
-    // #[inline]
-    // async fn update_state_downloading(&self) {
-    //     let mut state = self.dl_state.write().await;
-    //     *state = DownloadState::Downloading;
-    // }
-
-    // #[inline]
-    // async fn update_state_completed(&self) {
-    //     let mut state = self.dl_state.write().await;
-    //     *state = DownloadState::Completed;
-    // }
-
-    // #[inline]
-    // async fn update_state_paused(&self) {
-    //     let mut state = self.dl_state.write().await;
-    //     *state = DownloadState::Paused;
-    // }
-
-    // #[inline]
-    // async fn update_state_stopped(&self) {
-    //     let mut state = self.dl_state.write().await;
-    //     *state = DownloadState::Stopped;
-    // }
-
-    // #[inline]
-    // async fn update_state_error(&self) {
-    //     let mut state = self.dl_state.write().await;
-    //     *state = DownloadState::Error;
-    // }
-
-    // #[inline]
-    // async fn get_download_state(&self) -> DownloadState {
-    //     let state = self.dl_state.read().await;
-    //     state.clone()
-    // }
-
-    // /// A function to subscribe to get support for download manager
-    // ///
-    // /// Feature includes download, pause, resume
-    // ///
-    // /// However download is by default and it will start even if subscribe is not called
-    // pub async fn subscribe_downloadmanager(&self) -> &Self {
-    //     let (sender, receiver) = mpsc::channel::<DownloadCommand>(2);
-    //     {
-    //         let mut control_tx = self.control_tx.lock().await;
-    //         *control_tx = Some(sender);
-    //     }
-
-    //     {
-    //         let mut control_rx = self.control_rx.lock().await;
-    //         *control_rx = Some(receiver);
-    //     }
-
-    //     self
-    // }
-
-    // /// To pause the download
-    // pub async fn pause(&self) -> Result<(), Box<dyn std::error::Error>> {
-    //     let state = self.get_download_state().await;
-    //     if state == DownloadState::Paused {
-    //         return Ok(());
-    //     }
-
-    //     if let Some(control_tx) = self.control_tx.lock().await.clone() {
-    //         control_tx.send(DownloadCommand::Pause).await?;
-    //     };
-
-    //     self.update_state_paused().await;
-
-    //     Ok(())
-    // }
-
-    // /// To resume the download
-    // pub async fn resume(&self) -> Result<(), Box<dyn std::error::Error>> {
-    //     let state = self.get_download_state().await;
-    //     if state == DownloadState::Downloading {
-    //         return Ok(());
-    //     }
-
-    //     if let Some(control_tx) = self.control_tx.lock().await.clone() {
-    //         control_tx.send(DownloadCommand::Resume).await?;
-    //     }
-
-    //     self.update_state_downloading().await;
-
-    //     Ok(())
-    // }
-
-    // /// To stop the download
-    // pub async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
-    //     let state = self.get_download_state().await;
-    //     if state == DownloadState::Stopped {
-    //         return Ok(());
-    //     }
-
-    //     if let Some(control_tx) = self.control_tx.lock().await.clone() {
-    //         control_tx.send(DownloadCommand::Stop).await?;
-    //     }
-
-    //     self.update_state_stopped().await;
-
-    //     Ok(())
-    // }
 
     /// A function to subscribe to get support for download manager
     ///
     /// Feature includes download, pause, resume
     ///
     /// However download is by default and it will start even if subscribe is not called
-    pub async fn subscribe_downloadmanager(&self) -> &Self {
+    pub async fn subscribe_downloadmanager(&mut self) -> &mut Self {
         let (sender, receiver) = mpsc::channel::<DownloadCommand>(2);
         {
             let dm = self.download_manager.lock().await;
@@ -664,8 +613,6 @@ impl SwarmManager {
         Ok(path)
     }
 
-    //----->>
-
     pub async fn connect_and_exchange_bitfield(
         &mut self,
         ip_addr: Vec<String>,
@@ -674,57 +621,157 @@ impl SwarmManager {
     ) {
         let mut tasks = vec![];
         self.self_peer_id = peer_id.iter().map(|b| format!("{:02x}", b)).collect();
-
+    
         //<< To handle a "ok" call from peer, so that progress can be received and sent
         let (tx, rx) = mpsc::channel::<()>(16);
         self.notfier_rx = Arc::new(Mutex::new(Some(rx)));
         //>>
-
+    
+        let semaphore = Arc::new(Semaphore::new(5));
+        let unchoked_peers = Arc::clone(&self.unchoked_peers);
+    
         for addr in ip_addr {
+    
             let info_hash = info_hash.clone();
             let self_peer_id = peer_id.clone();
             let connections = Arc::clone(&self.connections);
-
             let notifier_tx = tx.clone();
-
+            let semaphore = semaphore.clone();
+            let unchoked_peers = unchoked_peers.clone();
+    
             tasks.push(tokio::spawn(async move {
+                let _permit = semaphore.acquire().await.expect("Failed to acquire semaphore");
+    
                 match PeerConnection::init(addr).await {
                     Ok(mut conn) => match conn.init_handshaking(info_hash, self_peer_id).await {
                         Ok(handshake) => {
-                            conn.receive_bitfield(handshake.remote_peer_id()).await;
-
-                            let mut connections = connections.lock().await;
-
-                            // This is so that each peer can notify--after any progress on download--those progress info are ready to be received.
+    
+                            conn.bitfield_info.peer_id = handshake.remote_peer_id();
+                            
+                            // Set up progress subscriber
                             conn.include_progress_subscriber(notifier_tx);
+        
+                            let mut has_bitfield = false;
+                            let mut has_unchoke = false;
+                            let mut has_have = false;
+                            let mut timeout_counter = 0;
+                            const MAX_TIMEOUT: u32 = 3;
+                            let mut message = conn.message.lock().await;
+                                
+                            loop {
+                                match message.exchange_msg().await {
+                                    Ok(_) => {
+                                        match &message.message_type {
+                                            MessageType::BitField(bitfield) => {
+                                                let mut piece_idx: HashSet<u32> = HashSet::new();
+                                                for (byte_idx, byte) in bitfield.iter().enumerate() {
+                                                    for bit in 0..8 {
+                                                        if byte >> (7-bit) & 1 == 1 {
+                                                            piece_idx.insert(byte_idx as u32 * 8 + bit);
+                                                        }  
+                                                    }
+                                                }
+                                                conn.bitfield_info.present_pieces = piece_idx.clone();
+                                                has_bitfield = true;
+                                                timeout_counter = 0;
 
-                            connections.push(conn);
+                                                if let Err(e) = message.interested().await { 
+                                                    eprintln!("Failed to send interested message: {e}");
+                                                    return;
+                                                }                
+                                            }
+    
+                                            MessageType::Have(piece_index) => {
+                                                conn.bitfield_info.present_pieces.insert(*piece_index);
+                                                has_have = true;
+                                                timeout_counter = 0;
+
+                                                if let Err(e) = message.interested().await { 
+                                                    eprintln!("Failed to send interested message: {e}");
+                                                    return;
+                                                }
+                                            }
+    
+                                            MessageType::Unchoke => {
+                                                has_unchoke = true;
+                                                unchoked_peers.write().await.insert(handshake.remote_peer_id());
+                                                timeout_counter = 0;
+
+                                                println!("Got unchoke from peer {}", handshake.remote_peer_id());
+                                            }
+    
+                                            MessageType::Choke => {
+                                                println!("Got choked by peer {}", handshake.remote_peer_id());
+                                            }
+    
+                                            other => {
+                                                println!("Received message: {:?} from peer {}", other, handshake.remote_peer_id());
+                                                timeout_counter = 0;
+                                            }
+                                        }
+    
+                                        // If we got unchoke, we can work with this peer
+                                        if has_unchoke && (has_bitfield || has_have) {
+                                            println!("SUCCESS: Got unchoke from {} - peer is ready for download!", handshake.remote_peer_id());
+                                            break;
+                                        }
+                                        
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Error exchanging message with {}: {e}", handshake.remote_peer_id());
+                                        break;                        
+                                    }
+                                }
+    
+                                // Increment timeout counter
+                                timeout_counter += 1;
+                                
+                                // Check timeout
+                                if timeout_counter >= MAX_TIMEOUT {
+                                    println!("TIMEOUT: No progress from peer {} for {} seconds, giving up", handshake.remote_peer_id(), MAX_TIMEOUT);
+                                    break;
+                                }
+
+                                println!("Counter {timeout_counter}");
+                                
+                                // Small delay to prevent busy waiting
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                            }
+    
+                            drop(message);
+    
+                            if has_bitfield || has_unchoke || has_have {
+                                let mut connections = connections.lock().await;
+                                
+                                connections.push(conn);
+                            }
                         }
-
+    
                         Err(e) => {
-                            eprintln!("Error occured on initiating handshake. FurtherMore {e:?} ",);
+                            eprintln!("Error occurred on initiating handshake: {e:?}");
                             return;
                         }
                     },
-
+    
                     Err(e) => {
-                        eprintln!("Failed to establish connection. FurtherMore {:?}", e);
+                        eprintln!("Failed to establish connection: {e:?}");
                     }
                 }
+
+                drop(_permit);
             }));
         }
-
+    
         for task in tasks {
             let _ = task.await;
         }
-
+    
         // To receive a call from PeerConnection, to send the progress info through the channel.
-        // User has to first subcribe for updates and pass the tx(Sender)
         if self.progress_tx.clone().is_some() {
             let this = Arc::new(self.clone());
             this.progress_listener().await;
         }
-
+    
         self.info_hash = info_hash.iter().map(|b| format!("{:02X}", b)).collect()
     }
 
@@ -788,27 +835,28 @@ impl SwarmManager {
         file_size: usize,
         pieces: &Vec<String>,
         piece_len: usize,
-    ) {
+    ) {        
+        // Step 1: Select which pieces each peer will download
         self.peer_pieces_selection().await;
+                
+        // Step 2: Validate we have peers to work with
+        if self.peer_pieces.is_empty() {
+            println!("ERROR: No peers with pieces available. Cannot start download.");
+            return;
+        }
+        
         let total_pieces = (file_size + piece_len - 1) / piece_len;
-
-        //<< For Passing through asynchronous task.
+    
+        //  Set up shared state for download tasks
         let completed_pieces = Arc::clone(&self.completed_pieces);
-        let unchoked_peers = Arc::new(RwLock::new(HashSet::new()));
-        let working_pieces = Arc::new(RwLock::new(HashSet::new()));
-
+        // let unchoked_peers = Arc::clone(&self.unchoked_peers);
         let mut tasks = Vec::new();
-
+    
         let destination = Arc::new(self.destination.clone());
         let pieces = Arc::new(pieces.clone());
         let connections = self.connections.clone();
-        let info_hash = self.info_hash.clone();
-        let peer_pieces = self.peer_pieces.clone();
-        //>>
-
-        // Download Manager
-        // Mark state as initialzied downloading
-        // self.update_state_downloading().await;
+    
+        //  Initialize download manager
         let download_manager = Arc::clone(&self.download_manager);
         {
             download_manager
@@ -817,159 +865,117 @@ impl SwarmManager {
                 .update_state_downloading()
                 .await;
         }
-
-        for (peer, indexes) in &self.peer_pieces {
+    
+        // Create download tasks for each peer
+        let semaphore = Arc::new(Semaphore::new(5)); // Limit concurrent downloads
+    
+        for (peer, indexes) in &self.peer_pieces.clone() {
             let connections = Arc::clone(&connections);
             let destination = Arc::clone(&destination);
             let completed_pieces = Arc::clone(&completed_pieces);
-            let unchoked_peers = Arc::clone(&unchoked_peers);
-            let working_pieces = Arc::clone(&working_pieces);
+            //let unchoked_peers = Arc::clone(&unchoked_peers);
             let pieces = Arc::clone(&pieces);
-
+            // let download_manager = Arc::clone(&download_manager);
+            let semaphore = semaphore.clone();
+    
             let indexes = indexes.clone();
             let peer = peer.clone();
 
-            let info_hash = self.info_hash.clone();
-            let peer_pieces = self.peer_pieces.clone();
+            // let info_hash = self.info_hash.clone();
+            // let peer_pieces = self.peer_pieces.clone();
 
-            let download_manager = Arc::clone(&self.download_manager);
-
+    
             tasks.push(tokio::spawn(async move {
+                let _permit = semaphore.acquire().await.expect("Could not acquire semaphore");
+    
                 for index in indexes {
-                    let dl_state = { download_manager.lock().await.dl_state.read().await.clone() };
-
-                    match dl_state {
-                        DownloadState::Paused => {
-                            // Save download state
-                            // wait
-                        }
-                        DownloadState::Resumed => {
-                            // load download state
-                            // start download
-                            // update state to downloading
-                            {
-                                let dm = download_manager.lock().await;
-                                let mut state = dm.dl_state.write().await;
-                                *state = DownloadState::Downloading;
+                    
+                    // Add timeout for each piece download
+                    match tokio::time::timeout(Duration::from_secs(60), async {
+                        // Find the peer connection and verify it's ready
+                        let mut connections = connections.lock().await;
+                        if let Some(conn) = connections
+                            .iter_mut()
+                            .find(|x| x.bitfield_info.peer_id == *peer)
+                        {
+                            // Verify peer has this piece
+                            if !conn.bitfield_info.present_pieces.contains(&index) {
+                                return Ok(());
                             }
-                        }
-                        DownloadState::Stopped => {
-                            // Save download state
-                            let dm = download_manager.lock().await;
-                            if let Err(e) = dm
-                                .save_download_state(
-                                    completed_pieces.read().await.clone(),
-                                    destination.to_string(),
-                                    info_hash,
-                                    peer_pieces,
-                                )
-                                .await
-                            {
-                                *dm.dl_state.write().await = DownloadState::Error;
-                                eprintln!("Error occured while saving downloads state. More: {e}");
+
+                            // Calculate piece length
+                            let actual_piece_length = if index as usize == total_pieces - 1 {
+                                file_size - (index as usize * piece_len)
+                            } else {
+                                piece_len
                             };
 
-                            return;
-                        }
-
-                        DownloadState::Completed => return,
-                        DownloadState::Error => {
-                            eprintln!("DownloadState has an error.");
-                        }
-
-                        // This is for `DownloadState::Downloading` and `DownloadState::Initialized`
-                        // No need to interfere in such state.
-                        _ => {}
-                    }
-
-                    let pieces_completed_or_downloading = {
-                        let completed = completed_pieces.read().await;
-                        let mut working = working_pieces.write().await;
-
-                        if completed.contains(&index) || working.contains(&index) {
-                            true
-                        } else {
-                            working.insert(index);
-                            false
-                        }
-                    };
-
-                    if pieces_completed_or_downloading {
-                        continue;
-                    };
-
-                    let mut connections = connections.lock().await;
-                    if let Some(conn) = connections
-                        .iter_mut()
-                        .find(|x| x.bitfield_info.peer_id == *peer)
-                    {
-                        let should_unchoke = {
-                            let unchoke = unchoked_peers.read().await;
-                            !unchoke.contains(&peer)
-                        };
-                        if should_unchoke {
-                            let mut message = conn.message.lock().await;
-                            // Send interested message
-                            message.interested().await;
-
-                            // Wait for unchoke. right after sending interested message
-                            if !message.wait_unchoke().await {
-                                if !message.wait_unchoke().await {
-                                    eprintln!("Peer {} did not unchoke, skipping", peer);
-                                    return;
-                                }
-                            };
-                            unchoked_peers.write().await.insert(peer.clone());
-                        }
-
-                        let actual_piece_length = if index as usize == total_pieces - 1 {
-                            file_size - (index as usize * piece_len)
-                        } else {
-                            piece_len
-                        };
-
-                        // Downlaod blocks of each pieces
-                        if let Err(e) = conn
-                            .download_piece_blocks(
+                            // Download the piece
+                            conn.download_piece_blocks(
                                 index,
                                 &pieces,
                                 actual_piece_length,
                                 &destination,
                                 piece_len as u32,
                                 Some("download".to_string()),
-                            )
-                            .await
-                        {
-                            eprintln!("Error on downloading piece. FurtherMore:  {e}");
-                        };
-
-                        // To Mark pieces of particular index as completed
-                        // let mut completed = completed_pieces.lock().await;
-                        let mut completed = completed_pieces.write().await;
-                        completed.insert(index);
-                        drop(completed);
-
-                        // It's no longer downloading as it should have already downloaded by now.
-                        let mut working = working_pieces.write().await;
-                        working.remove(&index);
+                            ).await
+                        } else {
+                            eprintln!("ERROR: Could not find connection for peer {}", peer);
+                            return Ok(());
+                        }
+                    }).await {
+                        Ok(Ok(_)) => {
+                            // Success
+                            let mut completed = completed_pieces.write().await;
+                            completed.insert(index);
+                        }
+                        Ok(Err(e)) => {
+                            eprintln!("ERROR: Failed to download piece {} from peer {}: {e}", index, peer);
+                        }
+                        Err(_) => {
+                            eprintln!("TIMEOUT: Piece {} download timed out for peer {}", index, peer);
+                        }
                     }
                 }
+    
+                drop(_permit);
             }));
         }
+    
 
-        for task in tasks {
-            if let Err(e) = task.await {
-                eprintln!("Task failed: {e}");
+            let mut completed_count = 0;
+            let mut failed_count = 0;
+            
+            for task in tasks {
+                match task.await {
+                    Ok(_) => {
+                        completed_count += 1;
+                        println!("Download task completed successfully");
+                    }
+                    Err(e) => {
+                        failed_count += 1;
+                        eprintln!("Download task failed: {e}");
+                    }
+                }
             }
-        }
-
-        // Download Manager
-        // Mark state as completed
-        // self.update_state_completed().await;
-        {
-            download_manager.lock().await.update_state_completed().await;
-        }
-    }
+            
+            // Final status and cleanup
+            {
+                let completed = completed_pieces.read().await;
+                println!("__Download summary: {} pieces completed, {} tasks succeeded, {} tasks failed__ at {}", 
+                        completed.len(), completed_count, failed_count, destination);
+            }
+            
+            // Update download manager state
+            {
+                let  dm = download_manager.lock().await;
+                if completed_pieces.read().await.len() >= total_pieces {
+                    dm.update_state_completed().await;
+                } else {
+                    dm.update_state_stopped().await;
+                }
+            }
+        }    
 }
 
 #[cfg(test)]
@@ -987,7 +993,12 @@ mod test_connection {
     #[tokio::test]
     async fn connection() {
         let meta: TorrentFile = TorrentFile::new();
-        let encoded_data = meta.read_file(Path::new("./sample.torrent")).unwrap();
+        // let encoded_data = meta.read_file(Path::new("./sample.torrent")).unwrap();
+        let encoded_data = meta
+            .read_file(Path::new(
+                "/home/sauhardha-kafle/Desktop/ubuntu-25.04-desktop-amd64.iso.torrent",
+            ))
+            .unwrap();
         let meta: TorrentFile = meta.parse_metafile(&encoded_data);
 
         let (length, _files) = match &meta.info.key {
@@ -1031,7 +1042,8 @@ mod test_connection {
         )
         .await;
 
-        let path = temp_dir().join("testing.txt").to_string_lossy().to_string();
+
+        let path = temp_dir().join("testing.iso").to_string_lossy().to_string();
         dm.destination(path)
             .final_peer_msg(
                 length.unwrap().clone(),

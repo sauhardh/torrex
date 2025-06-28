@@ -1,9 +1,9 @@
 use reqwest;
 use serde::{Deserialize, Serialize};
+use serde_bytes::ByteBuf;
 
 use std::borrow::Cow;
 
-use crate::bencode::Bencode;
 use crate::utils::random;
 
 #[derive(Debug, Serialize, Clone)]
@@ -73,40 +73,123 @@ impl RequestParams {
     }
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct PeerDict {
+    pub ip: String,
+    #[serde(rename = "peer id", default)]
+    pub peer_id: Option<ByteBuf>, // Changed to ByteBuf to handle binary data
+    pub port: u16,
+}
+
+#[derive(Debug, Clone)]
+pub enum PeersField {
+    Compact(ByteBuf),
+    Dict(Vec<PeerDict>),
+}
+
+impl Default for PeersField {
+    fn default() -> Self {
+        PeersField::Compact(ByteBuf::new())
+    }
+}
+
+use serde::de::{self, Visitor};
+use std::fmt;
+
+impl<'de> Deserialize<'de> for PeersField {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        struct PeersVisitor;
+
+        impl<'de> Visitor<'de> for PeersVisitor {
+            type Value = PeersField;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("Compact binary peer list or list of dictionaries")
+            }
+
+            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(PeersField::Compact(ByteBuf::from(v)))
+            }
+
+            fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(PeersField::Compact(ByteBuf::from(v)))
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(PeersField::Compact(ByteBuf::from(v.as_bytes())))
+            }
+
+            fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: de::SeqAccess<'de>,
+            {
+                let peers = Deserialize::deserialize(de::value::SeqAccessDeserializer::new(seq))?;
+                Ok(PeersField::Dict(peers))
+            }
+        }
+
+        deserializer.deserialize_any(PeersVisitor)
+    }
+}
+
 #[derive(Debug, Default, Deserialize, Clone)]
 pub struct ResponseParams {
     /// Number of peers who have finished downloading
+    #[serde(default)]
     pub complete: u32,
     /// Number of peers who are still downloading (leechers)
+    #[serde(default)]
     pub incomplete: u32,
     /// Minimum seconds to wait before recontacting the tracker.
-    #[serde(rename = "min interval")]
+    #[serde(rename = "min interval", default)]
     pub min_interval: u32,
     /// An integer, indicating how often your client should make a request to the tracker.
+    #[serde(default)]
     pub interval: u32,
     /// Dictionary which contains list of peers that your client can connect to.
     /// Each peer is represented using 6 bytes.
     /// The first 4 bytes are the peer's IP address and the last 2 bytes are the peer's port number.
-    pub peers: Vec<u8>,
+    #[serde(default)]
+    pub peers: PeersField,
 }
 
 impl ResponseParams {
     pub fn peers_ip(&self) -> Vec<String> {
-        self.peers
-            .chunks_exact(6)
-            .map(|chunk| {
-                let (ip_bytes, port_bytes) = chunk.split_at(4);
-                let port: u16 = ((port_bytes[0] as u16) << 8) | port_bytes[1] as u16;
+        match &self.peers {
+            PeersField::Compact(buf) => buf
+                .as_ref()
+                .chunks_exact(6)
+                .map(|chunk| {
+                    let (ip_bytes, port_bytes) = chunk.split_at(4);
+                    let port: u16 = ((port_bytes[0] as u16) << 8) | port_bytes[1] as u16;
 
-                let ip_addr = ip_bytes
-                    .iter()
-                    .map(|byte| byte.to_string())
-                    .collect::<Vec<_>>()
-                    .join(".");
+                    let ip_addr = ip_bytes
+                        .iter()
+                        .map(|byte| byte.to_string())
+                        .collect::<Vec<_>>()
+                        .join(".");
 
-                format!("{ip_addr}:{port}")
-            })
-            .collect::<Vec<_>>()
+                    format!("{ip_addr}:{port}")
+                })
+                .collect(),
+
+            PeersField::Dict(list) => list
+                .iter()
+                .map(|p| format!("{}:{}", p.ip, p.port))
+                .collect(),
+        }
     }
 }
 
@@ -144,8 +227,15 @@ impl Peers {
             .append_pair("compact", &params.compact.to_string());
 
         if let Some(event) = &params.event {
-            url.query_pairs_mut()
-                .append_pair("event", &format!("{:?}", event));
+            let event_str = match event {
+                Event::Started => "started",
+                Event::Completed => "completed",
+                Event::Stopped => "stopped",
+                Event::Empty => "",
+            };
+            if !event_str.is_empty() {
+                url.query_pairs_mut().append_pair("event", event_str);
+            }
         }
 
         let res_body = match client.get(url).send().await {
@@ -165,12 +255,22 @@ impl Peers {
         };
 
         if let Some(body) = res_body {
-            if let Ok(parsed) =
-                serde_json::from_value::<ResponseParams>(Bencode::new().decoder(&body).0)
-            {
-                self.response = Some(parsed);
-            } else {
-                eprintln!("Failed to parse response bencoded value to ResponseParams");
+            match serde_bencode::from_bytes::<ResponseParams>(&body) {
+                Ok(parsed) => {
+                    self.response = Some(parsed);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Failed to parse response. Error: {e}. Got: Raw response: {}",
+                        String::from_utf8_lossy(&body)
+                    );
+
+                    if let Ok(debug_value) =
+                        serde_bencode::from_bytes::<serde_bencode::value::Value>(&body)
+                    {
+                        eprintln!("Debug parsed structure: {:#?}", debug_value);
+                    }
+                }
             }
         } else {
             eprintln!("Tracker request failed, response body is empty");
@@ -185,7 +285,6 @@ impl Peers {
         self
     }
 }
-
 #[cfg(test)]
 mod test_peers {
     use super::*;

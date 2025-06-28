@@ -1,14 +1,14 @@
 use serde_json::value::Value;
 use std::{
     collections::{BTreeMap, HashMap},
+    time::Duration,
     vec,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+    time::timeout,
 };
-
-use serde::Serialize;
 
 use crate::{
     bencode::Bencode,
@@ -16,6 +16,7 @@ use crate::{
     extension::magnet_link::ExtendedHandshake,
     metainfo::{FileKey, Info},
 };
+use serde::Serialize;
 
 /// The metadata extension supports the following message types.
 #[derive(Debug, Serialize, Clone)]
@@ -231,68 +232,79 @@ impl ExtendedMetadataExchange {
     ) -> Option<(ExtendedMetadataExchange, Info)> {
         for addr in ips.clone() {
             if let Ok(mut conn) = PeerConnection::init(addr).await {
-                match conn
-                    .init_handshaking(info_hash.clone(), peer_id.as_bytes().to_vec())
-                    .await
-                {
-                    Ok(handshake) => {
-                        if handshake.is_magnet_supported() {
-                            let mut params: HashMap<String, u8> = HashMap::new();
-                            params.insert("ut_metadata".to_string(), 16);
+                let handshake_result = timeout(
+                    Duration::from_secs(10),
+                    conn.init_handshaking(info_hash.clone(), peer_id.as_bytes().to_vec()),
+                )
+                .await;
 
-                            let stream = &mut conn.stream.lock().await;
+                match handshake_result {
+                    Ok(h) => match h {
+                        Ok(handshake) => {
+                            if handshake.is_magnet_supported() {
+                                let mut params: HashMap<String, u8> = HashMap::new();
+                                params.insert("ut_metadata".to_string(), 16);
 
-                            match ExtendedHandshake::new()
-                                .extd_init_handshaking(stream, params)
-                                .await
-                            {
-                                Ok(_response) => {
-                                    let mut metadata = ExtendedMetadataExchange::new();
-                                    let v = metadata
-                                        .set_message_id(Some(20))
-                                        .set_extension_message_id(_response.m.ut_metadata)
-                                        .set_request(Some(0))
-                                        .to_bytes();
+                                let stream = &mut conn.stream.lock().await;
 
-                                    if let Err(e) = metadata.send_request(stream, &v).await {
-                                        eprintln!(
-                                            "Failed to send request for metadata. FurtherMore {:?}",
-                                            e
-                                        );
-                                    };
+                                match ExtendedHandshake::new()
+                                    .extd_init_handshaking(stream, params)
+                                    .await
+                                {
+                                    Ok(_response) => {
+                                        let mut metadata = ExtendedMetadataExchange::new();
+                                        let v = metadata
+                                            .set_message_id(Some(20))
+                                            .set_extension_message_id(_response.m.ut_metadata)
+                                            .set_request(Some(0))
+                                            .to_bytes();
 
-                                    match metadata.receive_data(stream).await {
-                                        Ok(info) => {
-                                            let (length, _files) = match &info.1.key {
-                                                FileKey::SingleFile { length } => {
-                                                    (Some(length), None)
-                                                }
-                                                FileKey::MultiFile { files } => (None, Some(files)),
-                                            };
-
-                                            return Some(info);
-                                        }
-                                        Err(e) => {
+                                        if let Err(e) = metadata.send_request(stream, &v).await {
                                             eprintln!(
-                                                "Failed to receive metadata. FurtherMore {:?}",
+                                                "Failed to send request for metadata. FurtherMore {:?}",
                                                 e
                                             );
-                                            continue;
+                                        };
+
+                                        match metadata.receive_data(stream).await {
+                                            Ok(info) => {
+                                                let (length, _files) = match &info.1.key {
+                                                    FileKey::SingleFile { length } => {
+                                                        (Some(length), None)
+                                                    }
+                                                    FileKey::MultiFile { files } => {
+                                                        (None, Some(files))
+                                                    }
+                                                };
+
+                                                return Some(info);
+                                            }
+                                            Err(e) => {
+                                                eprintln!(
+                                                    "Failed to receive metadata. FurtherMore {:?}",
+                                                    e
+                                                );
+                                                continue;
+                                            }
                                         }
                                     }
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "Failed to send extented handshake. FurtherMore: {e}"
-                                    );
-                                    continue;
+                                    Err(e) => {
+                                        eprintln!(
+                                            "Failed to send extented handshake. FurtherMore: {e}"
+                                        );
+                                        continue;
+                                    }
                                 }
                             }
                         }
-                    }
 
+                        Err(e) => {
+                            eprintln!("Error occured on initiating handshake {e:?} ",);
+                            continue;
+                        }
+                    },
                     Err(e) => {
-                        eprintln!("Error occured on initiating handshake {e:?} ",);
+                        eprintln!("timeout while inital handshaking {e:?} ",);
                         continue;
                     }
                 }
@@ -316,9 +328,16 @@ mod test_extdmetadataexchange {
     #[tokio::test]
     async fn test() {
         // let url: String = "magnet:?xt=urn:btih:ad42ce8109f54c99613ce38f9b4d87e70f24a165&dn=magnet1.gif&tr=http%3A%2F%2Fbittorrent-test-tracker.codecrafters.io%2Fannounce".to_string();
-        let url: String = "magnet:?xt=urn:btih:c5fb9894bdaba464811b088d806bdd611ba490af&dn=magnet3.gif&tr=http%3A%2F%2Fbittorrent-test-tracker.codecrafters.io%2Fannounce".to_string();
+        // let url: String = "magnet:?xt=urn:btih:c5fb9894bdaba464811b088d806bdd611ba490af&dn=magnet3.gif&tr=http%3A%2F%2Fbittorrent-test-tracker.codecrafters.io%2Fannounce".to_string();
+        // let url: String = "magnet:?xt=urn:btih:4344503b7e797ebf31582327a5baae35b11bda01&dn=ubuntu-16.04-desktop-amd64.iso&tr=http%3A%2F%2Ftorrent.ubuntu.com%3A6969%2Fannounce&tr=http%3A%2F%2Fipv6.torrent.ubuntu.com%3A6969%2Fannounce".to_string();
+        // let url: String = "magnet:?xt=urn:btih:cfb0ce978c1c8ec691d76e207f349337bce6efc4&dn=ubuntu-20.04.6-desktop-amd64.iso&tr=http://tracker.renfei.net:8080/announce".to_string();
+        // let url: String = "magnet:?xt=urn:btih:B825E41C45159B8F9E5D71955222CE257E2D90D4&dn=The.Phoenician.Scheme.2025.1080p.WEB-DL.DDP5.1.x265-NeoNoir&tr=http://tracker.openbittorrent.com:80/announce".to_string();
+        let url: String = "magnet:?xt=urn:btih:f1c3123613342bf5c480324bf55192e5fa9a67c2&dn=MaunaLinux-24.7-MATE-amd64.iso&tr=http://tracker.moxing.party:6969/announce".to_string();
+
         let mut parser = &mut Parser::new(url);
         parser = parser.parse();
+
+        println!("parser {parser:?}");
 
         let info_hash = &parser.magnet_link.xt.clone();
         let announce_url = &parser
@@ -348,6 +367,8 @@ mod test_extdmetadataexchange {
             .request_tracker()
             .await
             .peers_ip();
+
+        println!("ips {ips:?}");
 
         let self_peer_id = random::generate_magnet_peerid();
         let extd = ExtendedMetadataExchange::new();

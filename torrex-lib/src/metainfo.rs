@@ -63,12 +63,22 @@ impl Info {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum UrlList {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
 #[derive(Default, Deserialize, Debug, Serialize, Clone)]
 pub struct TorrentFile {
     ///  The URL of the tracker.
     pub announce: String,
     /// This maps to a dictionary.
     pub info: Info,
+    // Optional webseed(s)
+    #[serde(rename = "url-list")]
+    pub url_list: Option<UrlList>,
 }
 
 impl TorrentFile {

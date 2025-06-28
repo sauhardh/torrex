@@ -54,6 +54,7 @@ impl DownloadState {
             self_peer_id,
             ips,
             length,
+            // status: DownloadChecker::NotDownloaded,
         }
     }
 }

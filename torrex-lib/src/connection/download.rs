@@ -16,7 +16,6 @@ use crate::utils::config::config_dir;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum DownloadState {
-    Resumed,
     Downloading,
     Paused,
     Stopped,
@@ -87,11 +86,11 @@ impl DownloadManager {
         *state = DownloadState::Error;
     }
 
-    #[inline]
-    pub async fn update_state_resumed(&self) {
-        let mut state = self.dl_state.write().await;
-        *state = DownloadState::Resumed;
-    }
+    // #[inline]
+    // pub async fn update_state_resumed(&self) {
+    //     let mut state = self.dl_state.write().await;
+    //     *state = DownloadState::Resumed;
+    // }
 
     #[inline]
     pub async fn get_download_state(&self) -> DownloadState {
@@ -106,11 +105,14 @@ impl DownloadManager {
             return Ok(());
         }
 
+        self.update_state_paused().await;
+
+        // TODO:
+        // it may not be needed
+        //
         if let Some(control_tx) = self.control_tx.lock().await.clone() {
             control_tx.send(DownloadCommand::Pause).await?;
         };
-
-        self.update_state_paused().await;
 
         Ok(())
     }
@@ -126,7 +128,8 @@ impl DownloadManager {
             control_tx.send(DownloadCommand::Resume).await?;
         }
 
-        self.update_state_resumed().await;
+        // self.update_state_resumed().await;
+        self.update_state_downloading().await;
 
         Ok(())
     }
@@ -138,11 +141,14 @@ impl DownloadManager {
             return Ok(());
         }
 
+        self.update_state_stopped().await;
+
+        // TODO:
+        // it may not be needed
+        //
         if let Some(control_tx) = self.control_tx.lock().await.clone() {
             control_tx.send(DownloadCommand::Stop).await?;
         }
-
-        self.update_state_stopped().await;
 
         Ok(())
     }

@@ -1,3 +1,4 @@
+use actix_cors::Cors;
 use actix_web::App;
 use actix_web::HttpServer;
 use actix_web::middleware;
@@ -31,7 +32,10 @@ async fn main() -> std::io::Result<()> {
     });
 
     HttpServer::new(move || {
+        let cors = Cors::permissive();
+
         App::new()
+            .wrap(cors)
             .app_data(app_state.clone())
             .service(
                 web::scope("/torrex/api/v1")

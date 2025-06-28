@@ -19,6 +19,9 @@ pub struct ExtendedHandshakeM {
     #[serde(default)]
     pub ut_metadata: u8,
     ut_pex: Option<u8>,
+
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_bencode::value::Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -31,6 +34,10 @@ pub struct ExtendedHandshakeResponse {
     v: Option<String>,
     #[serde(default, with = "serde_bytes")]
     yourip: Option<Vec<u8>>,
+
+    /// For anyextra filed
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_bencode::value::Value>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -132,8 +139,10 @@ impl ExtendedHandshake {
         &mut self,
         stream: &mut TcpStream,
     ) -> Result<ExtendedHandshakeResponse, Box<dyn std::error::Error>> {
-        let mut bitfield_buf = [0u8; 6];
-        stream.read_exact(&mut bitfield_buf).await?;
+        // For magnet link and selected tracker, we need this to uncomment
+
+        // let mut bitfield_buf = [0u8; 6];
+        // stream.read_exact(&mut bitfield_buf).await?;
 
         let mut len_buf = [0u8; 4];
         stream.read_exact(&mut len_buf).await?;
@@ -142,16 +151,13 @@ impl ExtendedHandshake {
         let mut payload = vec![0u8; len as usize];
         stream.read_exact(&mut payload).await?;
 
-        if payload[0] != 20 {
-            return Err("Not an extended message".into());
+        if payload[0] != 20 || payload[1] != 0 {
+            return Err("Not an extended handshake".into());
         }
 
-        if payload[1] != 0 {
-            return Err("Not an extended handshake (ext_id != 0)".into());
-        }
-
+        let bencoded_data = &payload[2..];
         match serde_json::from_value::<ExtendedHandshakeResponse>(
-            Bencode::new().decoder(&payload[2..]).0,
+            Bencode::new().decoder(bencoded_data).0,
         ) {
             Ok(res) => {
                 return Ok(res);
@@ -163,6 +169,8 @@ impl ExtendedHandshake {
                 .into());
             }
         }
+        // let response: ExtendedHandshakeResponse = serde_bencode::from_bytes(bencoded_data)?;
+        // Ok(response)
     }
 
     pub async fn extd_init_handshaking(
@@ -246,8 +254,6 @@ impl<'a> ExtendedExchange<'a> {
 #[cfg(test)]
 mod test_extdhandshake {
 
-    use tokio::fs::File;
-
     use super::*;
 
     use crate::connection::connection::PeerConnection;
@@ -257,6 +263,9 @@ mod test_extdhandshake {
     #[tokio::test]
     async fn test() {
         let url: String = "magnet:?xt=urn:btih:3f994a835e090238873498636b98a3e78d1c34ca&dn=magnet2.gif&tr=http%3A%2F%2Fbittorrent-test-tracker.codecrafters.io%2Fannounce".to_string();
+        // let url: String = "magnet:?xt=urn:btih:4344503b7e797ebf31582327a5baae35b11bda01&dn=ubuntu-16.04-desktop-amd64.iso&tr=http%3A%2F%2Ftorrent.ubuntu.com%3A6969%2Fannounce&tr=http%3A%2F%2Fipv6.torrent.ubuntu.com%3A6969%2Fannounce".to_string();
+        // let url: String = "magnet:?xt=urn:btih:f1c3123613342bf5c480324bf55192e5fa9a67c2&dn=MaunaLinux-24.7-MATE-amd64.iso&tr=http://tracker.moxing.party:6969/announce".to_string();
+
         let mut parser = &mut Parser::new(url);
         parser = parser.parse();
 

@@ -62,6 +62,8 @@ pub enum MessageType {
     /// it will send duplicate request to other peers also. After getting the pieces from the "fastest" peers, other peers should be informed
     /// so, `Cancel` message is sent.
     Cancel { index: u32, begin: u32, length: u32 },
+    /// Extended protocol message
+    Extended(u8, Vec<u8>),
     /// Unknown message
     Unknown(u8, Vec<u8>), // Fallback
 }
@@ -69,7 +71,7 @@ pub enum MessageType {
 #[derive(Debug)]
 pub struct Messages {
     stream: Arc<Mutex<TcpStream>>,
-    message_type: MessageType,
+    pub message_type: MessageType,
 }
 
 impl Messages {
@@ -80,7 +82,9 @@ impl Messages {
         }
     }
 
-    pub async fn exchange_msg(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn exchange_msg(
+        &mut self,
+    ) -> Result<Option<&Self>, Box<dyn std::error::Error + Send + Sync>> {
         let mut msg: [u8; 5] = [0u8; 5];
 
         let mut stream = self.stream.lock().await;
@@ -91,7 +95,7 @@ impl Messages {
 
         if msg_len == 0 {
             self.message_type = MessageType::Unknown(0, vec![]);
-            return Ok(());
+            return Ok(None);
         }
         let mut payload = vec![0u8; (msg_len - 1) as usize];
         stream.read_exact(&mut payload).await?;
@@ -146,11 +150,35 @@ impl Messages {
                 }
             }
 
+            // Extended protocol (ID 20)
+            20 => {
+                if payload.len() >= 1 {
+                    let ext_id = payload[0];
+                    let ext_payload = payload[1..].to_vec();
+                    MessageType::Extended(ext_id, ext_payload)
+                } else {
+                    MessageType::Extended(0, payload)
+                }
+            }
+
             _ => MessageType::Unknown(msg_id, payload.clone()),
         };
 
+        // println!("\n_______message {:?}\n", message);
         self.message_type = message;
-        Ok(())
+        Ok(Some(self))
+    }
+
+    pub async fn wait_have(&mut self) -> Option<u32> {
+        if let Err(e) = self.exchange_msg().await {
+            eprintln!("Caused an error while waiting for have message. {e}");
+        }
+
+        if let MessageType::Have(payload) = &self.message_type {
+            return Some(*payload);
+        }
+
+        None
     }
 
     pub async fn wait_bitfield(&mut self) -> Option<HashSet<u32>> {
@@ -159,16 +187,12 @@ impl Messages {
         };
 
         if let MessageType::BitField(payload) = &self.message_type {
-            let bin = payload
-                .into_iter()
-                .map(|b| format!("{:08b}", b))
-                .collect::<String>();
-
             let mut pieces_idx = HashSet::new();
-
-            for (idx, val) in bin.split("").into_iter().enumerate() {
-                if val == "1" {
-                    pieces_idx.insert(idx as u32 - 1);
+            for (byte_idx, byte) in payload.iter().enumerate() {
+                for bit in 0..8 {
+                    if (byte >> (7 - bit)) & 1 == 1 {
+                        pieces_idx.insert((byte_idx * 8 + bit) as u32);
+                    }
                 }
             }
 
@@ -177,16 +201,16 @@ impl Messages {
         None
     }
 
-    pub async fn interested(&mut self) -> &Self {
+    pub async fn interested(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut stream = self.stream.lock().await;
-        let _ = stream.write_all(&[0, 0, 0, 1, 2]).await;
+        stream.write_all(&[0, 0, 0, 1, 2]).await?;
 
-        self
+        Ok(())
     }
 
     pub async fn wait_unchoke<'a>(&'a mut self) -> bool {
-        match timeout(Duration::from_secs(7), self.exchange_msg()).await {
-            Ok(Ok(_)) if self.message_type == MessageType::Unchoke => true,
+        match timeout(Duration::from_secs(20), self.exchange_msg()).await {
+            Ok(Ok(Some(msg))) if msg.message_type == MessageType::Unchoke => true,
             Ok(Ok(_)) => false,
 
             Err(_) | Ok(Err(_)) => {
@@ -206,29 +230,32 @@ impl Messages {
         }
     }
 
-    /// Message Type: request of ID 6.
-    ///  
-    /// Payload consist of `index`, `begin`, `length`
-    #[inline]
-    pub async fn send_request(
-        &self,
-        index: u32,
-        length: usize,
-        begin: usize,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut msg: Vec<u8> = Vec::with_capacity(17);
-        // Message length: 13 bytes of Payload (index, begin, length) + 1 bytes of message Id
-        msg.extend(&13u32.to_be_bytes());
-        // Message Id: 6 for `request` message type.
-        msg.push(6);
-        // Payload: (index, begin, length) each as 4 bytes.
-        msg.extend(&(index).to_be_bytes());
-        msg.extend(&(begin as u32).to_be_bytes());
-        msg.extend(&(length as u32).to_be_bytes());
+    //
+    // --> Commented out as it is not used "right now."
+    //
+    // / Message Type: request of ID 6.
+    // /
+    // / Payload consist of `index`, `begin`, `length`
+    // #[inline]
+    // pub async fn send_request(
+    //     &self,
+    //     index: u32,
+    //     length: usize,
+    //     begin: usize,
+    // ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    //     let mut msg: Vec<u8> = Vec::with_capacity(17);
+    //     // Message length: 13 bytes of Payload (index, begin, length) + 1 bytes of message Id
+    //     msg.extend(&13u32.to_be_bytes());
+    //     // Message Id: 6 for `request` message type.
+    //     msg.push(6);
+    //     // Payload: (index, begin, length) each as 4 bytes.
+    //     msg.extend(&(index).to_be_bytes());
+    //     msg.extend(&(begin as u32).to_be_bytes());
+    //     msg.extend(&(length as u32).to_be_bytes());
 
-        let mut stream = self.stream.lock().await;
-        stream.write_all(&msg).await?;
+    //     let mut stream = self.stream.lock().await;
+    //     stream.write_all(&msg).await?;
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 }

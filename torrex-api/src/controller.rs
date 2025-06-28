@@ -5,6 +5,7 @@ use actix_web::get;
 use actix_web::post;
 use actix_web::web;
 use actix_ws::CloseReason;
+use log::info;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -85,14 +86,15 @@ pub async fn initial_download_info_metafile(
         1,
     );
 
-    let ips = peers
+    let peers = peers
         .announce_url(meta.announce.clone())
-        .request_tracker(params)
-        .await
-        .response
-        .as_ref()
-        .unwrap()
-        .peers_ip();
+        .request_tracker(&params)
+        .await;
+
+    println!("peers {peers:?}");
+    // TODO: handle more gracefully
+    let ips = peers.response.as_ref().unwrap().peers_ip();
+    println!("___ips  are__: {ips:?}");
 
     {
         let state = state.downloads.lock();
@@ -109,7 +111,6 @@ pub async fn initial_download_info_metafile(
         "uuid": id.to_string(),
         "name": name,
         "length": length.unwrap(),
-
     }));
 }
 
@@ -130,17 +131,12 @@ pub async fn initial_download_info_magnet(
 
     let info_hash = &parser.magnet_link.xt.clone();
 
-    let (announce_url, name) = match (parser.magnet_link.tr.clone(), parser.magnet_link.dn.clone())
-    {
-        (Some(url), Some(name)) => (url, name),
-        _ => {
-            return HttpResponse::BadRequest().json(
-                json!({
-                    "success": "false",
-                    "message":format!("Failed to parse the provided link {:?}. Could not parse announce_url or name of the download.", query.url)
-                }));
-        }
-    };
+    let announce_url = parser.magnet_link.tr.clone();
+    let name = parser
+        .magnet_link
+        .dn
+        .clone()
+        .unwrap_or_else(|| "torrex_UnknownDownload".to_string());
 
     let mut extd_handshake = ExtendedExchange::new(parser);
     let info_hash = if let Ok(info_hash) = hex::decode(info_hash) {
@@ -154,24 +150,33 @@ pub async fn initial_download_info_magnet(
     };
 
     let peer_id = random::generate_magnet_peerid();
-    let ips = extd_handshake
-        .set_request(
-            info_hash.clone(),
-            peer_id.clone(), // random string
-            None,
-            6881,
-            0,
-            0,
-            999,
-            None,
-            1,
-        )
-        .set_url(announce_url.to_string())
-        .request_tracker()
-        .await
-        .peers_ip();
+    let ips = if let Some(url) = announce_url {
+        extd_handshake
+            .set_request(
+                info_hash.clone(),
+                peer_id.clone(), // random string
+                None,
+                6881,
+                0,
+                0,
+                999,
+                None,
+                1,
+            )
+            .set_url(url)
+            .request_tracker()
+            .await
+            .peers_ip()
+    } else {
+        return HttpResponse::BadRequest().json(json!({
+            "success": "false",
+            "message": "Could not get accounce_url. Currently trackerless features is not implemented"
+        }));
+    };
 
     let extd = ExtendedMetadataExchange::new();
+    println!("parser: {:?}", parser);
+    println!("ips: {:?}", ips);
     let info = if let Some(inf) = extd
         .handshaking(ips.clone(), info_hash.clone(), &peer_id)
         .await
@@ -280,11 +285,12 @@ pub async fn start_download(
         match kind {
             //------To download using the magnet link------
             DownloadKind::Magnet((_, info)) => {
-                let mut state = state.managers.lock().unwrap();
-                let sm = state.get_mut(&uuid).unwrap();
+                let mut manager = state.managers.lock().unwrap();
+                let sm = manager.get_mut(&uuid).unwrap();
 
                 // subscribe for updates
-                let sm = sm.subscribe_updates(tx);
+                // subscribe for download manager
+                let sm = sm.subscribe_updates(tx).subscribe_downloadmanager().await;
 
                 sm.connect_and_exchange_bitfield(
                     ips,
@@ -309,8 +315,8 @@ pub async fn start_download(
 
             //------To download using the torrent file------
             DownloadKind::Meta(meta) => {
-                let mut state = state.managers.lock().unwrap();
-                let sm = state.get_mut(&uuid).unwrap();
+                let mut manager = state.managers.lock().unwrap();
+                let sm = manager.get_mut(&uuid).unwrap();
 
                 // subscribe for updates
                 let sm = sm.subscribe_updates(tx);
@@ -398,4 +404,126 @@ async fn download_progress(
     });
 
     Ok(res)
+}
+
+#[derive(Deserialize)]
+struct UuidQuery {
+    uuid: String,
+}
+
+#[get("/pause")]
+async fn pause_download(
+    state: web::Data<AppState>,
+    query: web::Query<UuidQuery>,
+) -> impl Responder {
+    let Ok(uuid) = Uuid::parse_str(&query.uuid) else {
+        return HttpResponse::BadRequest().json(json!({
+            "success":"false",
+            "message":"Failed to parse uuid to string"
+        }));
+    };
+
+    let state = state.managers.lock();
+    let s_guard = match state {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to lock the state. {e:?}");
+            return HttpResponse::BadRequest().json(json!({
+                "success":"false",
+                "message":"Failed to parse uuid to string"
+            }));
+        }
+    };
+
+    if let Some(s) = s_guard.get(&uuid) {
+        let dm = s.download_manager.lock().await;
+        if let Err(e) = dm.pause().await {
+            return HttpResponse::BadRequest().json(json!({
+                "success":"false",
+                "message": format!("Failed to pause the download. {:?}", e)
+            }));
+        };
+    };
+
+    return HttpResponse::Ok().json(json!({
+        "success": "true",
+        "uuid": uuid.to_string()
+    }));
+}
+
+#[get("/stop")]
+async fn stop_download(state: web::Data<AppState>, query: web::Query<UuidQuery>) -> impl Responder {
+    let Ok(uuid) = Uuid::parse_str(&query.uuid) else {
+        return HttpResponse::BadRequest().json(json!({
+            "success":"false",
+            "message":"Failed to parse uuid to string"
+        }));
+    };
+
+    let state = state.managers.lock();
+    let s_guard = match state {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to lock the state. {e:?}");
+            return HttpResponse::BadRequest().json(json!({
+                "success":"false",
+                "message":"Failed to parse uuid to string"
+            }));
+        }
+    };
+
+    if let Some(s) = s_guard.get(&uuid) {
+        let dm = s.download_manager.lock().await;
+        if let Err(e) = dm.stop().await {
+            return HttpResponse::BadRequest().json(json!({
+                "success":"false",
+                "message": format!("Failed to stop the download. {:?}", e)
+            }));
+        };
+    };
+
+    return HttpResponse::Ok().json(json!({
+        "success": "true",
+        "uuid": uuid.to_string()
+    }));
+}
+
+#[get("/resume")]
+async fn resume_download(
+    state: web::Data<AppState>,
+    query: web::Query<UuidQuery>,
+) -> impl Responder {
+    let Ok(uuid) = Uuid::parse_str(&query.uuid) else {
+        return HttpResponse::BadRequest().json(json!({
+            "success":"false",
+            "message":"Failed to parse uuid to string"
+        }));
+    };
+
+    let state = state.managers.lock();
+    let s_guard = match state {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to lock the state. {e:?}");
+            return HttpResponse::BadRequest().json(json!({
+                "success":"false",
+                "message":"Failed to parse uuid to string"
+            }));
+        }
+    };
+
+    if let Some(s) = s_guard.get(&uuid) {
+        let dm = s.download_manager.lock().await;
+        if let Err(e) = dm.resume().await {
+            return HttpResponse::BadRequest().json(json!({
+                "success":"false",
+                "message": format!("Failed to resume the download. {:?}", e)
+            }));
+        };
+    };
+
+    return HttpResponse::Ok().json(json!({
+        "success": "true",
+        "uuid": uuid.to_string()
+    }));
 }
