@@ -191,7 +191,7 @@ impl ExtendedMetadataExchange {
         let extd_msg_id = payload[1];
 
         let ben_dict: BTreeMap<String, Value> =
-            serde_json::from_value(Bencode::new().decoder(&payload[2..]).0).unwrap();
+            serde_json::from_value(Bencode::new().decoder(&payload[2..]).0)?;
 
         let msg_type = ben_dict
             .get("msg_type")

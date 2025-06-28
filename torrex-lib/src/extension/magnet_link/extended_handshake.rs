@@ -139,14 +139,23 @@ impl ExtendedHandshake {
         &mut self,
         stream: &mut TcpStream,
     ) -> Result<ExtendedHandshakeResponse, Box<dyn std::error::Error>> {
-        // For magnet link and selected tracker, we need this to uncomment
-
-        // let mut bitfield_buf = [0u8; 6];
-        // stream.read_exact(&mut bitfield_buf).await?;
-
         let mut len_buf = [0u8; 4];
         stream.read_exact(&mut len_buf).await?;
-        let len = u32::from_be_bytes(len_buf);
+        let mut len = u32::from_be_bytes(len_buf);
+
+        if len == 2 {
+            let mut bitfield_header = [0u8; 2];
+            stream.read_exact(&mut bitfield_header).await?;
+
+            if bitfield_header[0] == 5 {
+                println!("Bitfield message(Padding) detected. Skipping...");
+            } else {
+                eprintln!("Very short length of handshake response detected. Ignoring for now!!!");
+            }
+
+            stream.read_exact(&mut len_buf).await?;
+            len = u32::from_be_bytes(len_buf);
+        }
 
         let mut payload = vec![0u8; len as usize];
         stream.read_exact(&mut payload).await?;
