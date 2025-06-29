@@ -542,6 +542,7 @@ async fn receive_piece_block(
         // Progress notifer
         // This sends as a notifier to the receiver, so that the receiver can now start to send a progress info to its receiver.
         if let Some(sender) = &self.progress_notifier_tx {
+            println!("--Sending notification--");
             sender.send(()).await?;
         };
 
@@ -951,7 +952,7 @@ impl SwarmManager {
         // To receive a call from PeerConnection, to send the progress info through the channel.
         if self.progress_tx.clone().is_some() {
             let this = Arc::new(self.clone());
-            this.progress_listener();
+            this.progress_listener().await;
         }
     
         self.info_hash = info_hash.iter().map(|b| format!("{:02X}", b)).collect()

@@ -329,7 +329,7 @@ pub async fn start_download(
                 let sm = manager.get_mut(&uuid).unwrap();
 
                 // subscribe for updates
-                let sm = sm.subscribe_updates(tx);
+                let sm = sm.subscribe_updates(tx).subscribe_downloadmanager().await;
 
                 let file_size = length;
                 let piece_length = meta.info.piece_length;
