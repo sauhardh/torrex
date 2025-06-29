@@ -292,13 +292,23 @@ pub async fn start_download(
                 // subscribe for download manager
                 let sm = sm.subscribe_updates(tx).subscribe_downloadmanager().await;
 
+                let file_size = length;
+                let piece_length = info.piece_length;
+
                 sm.connect_and_exchange_bitfield(
                     ips,
                     info_hash.to_vec(),
                     self_peer_id.as_bytes().to_vec(),
+                    file_size,
+                    piece_length,
                 )
                 .await;
-
+                // sm.connect_and_exchange_bitfield(
+                //     ips,
+                //     info_hash.to_vec(),
+                //     self_peer_id.as_bytes().to_vec(),
+                // )
+                // .await;
                 let destination = if let Some(dest) = &req_body.destination {
                     dest.clone()
                 } else {
@@ -321,12 +331,23 @@ pub async fn start_download(
                 // subscribe for updates
                 let sm = sm.subscribe_updates(tx);
 
+                let file_size = length;
+                let piece_length = meta.info.piece_length;
+
                 sm.connect_and_exchange_bitfield(
                     ips,
                     info_hash.to_vec(),
                     self_peer_id.as_bytes().to_vec(),
+                    file_size,
+                    piece_length,
                 )
                 .await;
+                // sm.connect_and_exchange_bitfield(
+                //     ips,
+                //     info_hash.to_vec(),
+                //     self_peer_id.as_bytes().to_vec(),
+                // )
+                // .await;
 
                 let destination = if let Some(dest) = &req_body.destination {
                     dest.clone()
@@ -338,7 +359,7 @@ pub async fn start_download(
                 };
 
                 sm.destination(destination)
-                    .final_peer_msg(length, &meta.info.pieces_hashes(), meta.info.piece_length)
+                    .final_peer_msg(file_size, &meta.info.pieces_hashes(), piece_length)
                     .await;
             }
         }

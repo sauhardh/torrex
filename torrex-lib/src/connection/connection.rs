@@ -118,7 +118,8 @@ impl PeerConnection {
         let mut stream = self.stream.lock().await;
         stream.write_all(&buf).await?;
 
-        handshake.handshake_reply(&mut stream).await
+        let reply = handshake.handshake_reply(&mut stream).await;
+        reply
     }
 
     pub async fn receive_have(&mut self, peer_id: String) -> bool {
@@ -203,64 +204,196 @@ impl PeerConnection {
         Ok(())
     }
 
+    // #[inline]
+    // async fn receive_piece_block(
+    //     &mut self,
+    //     total_blocks: usize,
+    //     actual_piece_length: usize,
+    // ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    //     let mut received_blocks = 0;
+
+    //     let mut consecutive_failure = 0;
+    //     const MAX_CONSECUTIVE_FAILURE : i32 = 2;
+
+    //     while received_blocks < total_blocks {
+    //         let output = {
+    //             let mut message = self.message.lock().await;
+    //             message.wait_piece_block().await
+    //         };
+    //         print!("waiting piece block done!! for {received_blocks} / {total_blocks}...\n");
+
+    //         if let Some(pb) = output {
+    //             match pb {
+    //                 MessageType::Piece {
+    //                     index,
+    //                     begin,
+    //                     block,
+    //                 } => {
+    //                     {
+    //                         let mut storage = self.block_storage.write().await;
+    //                         storage
+    //                             .entry(index)
+    //                             .or_default()
+    //                             .insert(begin, block.clone());
+    //                     }
+
+    //                     {
+    //                         let mut book = self.block_book.write().await;
+    //                         book.entry(index)
+    //                             .and_modify(|l| *l += block.len())
+    //                             .or_insert(block.len());
+    //                         print!("Book {:?}", book.get(&index));
+    //                         print!("/ Piece_length {}\n", actual_piece_length);
+    //                     }
+
+    //                     received_blocks += 1;
+
+    //                     // Check if piece is complete
+    //                     let is_complete = {
+    //                         let book = self.block_book.read().await;
+    //                         *book.get(&index).unwrap_or(&0) >= actual_piece_length
+    //                     };
+
+    //                     if is_complete {
+    //                         return Ok(true);
+    //                     }
+    //                 }
+    //                 other => {
+    //                     eprintln!(" receive_piece_block...Error: >> Expected only Piece type block. Got {other:?}");
+    //                     consecutive_failure +=1;
+
+    //                     if consecutive_failure >= MAX_CONSECUTIVE_FAILURE{
+    //                         return Err("To many consecutive failure. Could not receive data by".into());
+    //                     }
+
+    //                     println!("Retry to recieve piece block {}", consecutive_failure);
+    //                     // tokio::time::sleep(Duration::from_millis(100)).await;
+    //                     // continues;
+    //                 }
+    //             }
+    //         }
+    //     }
+
+    //     Ok(false)
+    // }
+
     #[inline]
-    async fn receive_piece_block(
-        &mut self,
-        total_blocks: usize,
-        actual_piece_length: usize,
-    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-        let mut received_blocks = 0;
+async fn receive_piece_block(
+    &mut self,
+    total_blocks: usize,
+    actual_piece_length: usize,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let mut received_blocks = 0;
+    let mut consecutive_failure = 0;
+    const MAX_CONSECUTIVE_FAILURE: i32 = 5; // Increased from 2 to 5
 
-        while received_blocks < total_blocks {
-            let output = {
-                let mut message = self.message.lock().await;
-                message.wait_piece_block().await
-            };
+    while received_blocks < total_blocks {
+        let output = {
+            let mut message = self.message.lock().await;
+            message.wait_piece_block().await
+        };
+        print!("waiting piece block done!! for {received_blocks} / {total_blocks}...\n");
 
-            if let Some(pb) = output {
-                match pb {
-                    MessageType::Piece {
-                        index,
-                        begin,
-                        block,
-                    } => {
-                        {
-                            let mut storage = self.block_storage.write().await;
-                            storage
-                                .entry(index)
-                                .or_default()
-                                .insert(begin, block.clone());
-                        }
-
-                        {
-                            let mut book = self.block_book.write().await;
-                            book.entry(index)
-                                .and_modify(|l| *l += block.len())
-                                .or_insert(block.len());
-                        }
-
-                        received_blocks += 1;
-
-                        // Check if piece is complete
-                        let is_complete = {
-                            let book = self.block_book.read().await;
-                            *book.get(&index).unwrap_or(&0) >= actual_piece_length
-                        };
-
-                        if is_complete {
-                            return Ok(true);
-                        }
+        if let Some(pb) = output {
+            match pb {
+                MessageType::Piece {
+                    index,
+                    begin,
+                    block,
+                } => {
+                    {
+                        let mut storage = self.block_storage.write().await;
+                        storage
+                            .entry(index)
+                            .or_default()
+                            .insert(begin, block.clone());
                     }
-                    other => {
-                        eprintln!("Error: >> Expected only Piece type block. Got {other:?}");
-                        continue;
+
+                    {
+                        let mut book = self.block_book.write().await;
+                        book.entry(index)
+                            .and_modify(|l| *l += block.len())
+                            .or_insert(block.len());
+                        print!("Book {:?}", book.get(&index));
+                        print!("/ Piece_length {}\n", actual_piece_length);
+                    }
+
+                    received_blocks += 1;
+                    consecutive_failure = 0; // Reset failure counter on success
+
+                    // Check if piece is complete
+                    let is_complete = {
+                        let book = self.block_book.read().await;
+                        *book.get(&index).unwrap_or(&0) >= actual_piece_length
+                    };
+
+                    if is_complete {
+                        return Ok(true);
                     }
                 }
+                
+                // Handle keep-alive messages gracefully
+                MessageType::Unknown(0, _) => {
+                    // This is a keep-alive message, not an error
+                    println!("Received keep-alive message, continuing...");
+                    consecutive_failure = 0; // Reset failure counter
+                    continue;
+                }
+                
+                // Handle other non-error messages
+                MessageType::Choke => {
+                    println!("Received choke message during piece download");
+                    consecutive_failure += 1;
+                }
+                
+                MessageType::Unchoke => {
+                    println!("Received unchoke message during piece download");
+                    consecutive_failure = 0; // Reset failure counter
+                }
+                
+                MessageType::Have(_) => {
+                    println!("Received have message during piece download");
+                    consecutive_failure = 0; // Reset failure counter
+                }
+                
+                MessageType::BitField(_) => {
+                    println!("Received bitfield message during piece download");
+                    consecutive_failure = 0; // Reset failure counter
+                }
+                
+                MessageType::Interested | MessageType::NotInterested => {
+                    println!("Received interest message during piece download");
+                    consecutive_failure = 0; // Reset failure counter
+                }
+                
+                MessageType::Extended(_, _) => {
+                    println!("Received extended message during piece download");
+                    consecutive_failure = 0; // Reset failure counter
+                }
+                
+                // Handle actual errors
+                other => {
+                    println!("Unexpected message during piece download: {other:?}");
+                    consecutive_failure += 1;
+                }
             }
+        } else {
+            // Timeout occurred
+            consecutive_failure += 1;
+            println!("Timeout waiting for piece block, retry {}/{}", consecutive_failure, MAX_CONSECUTIVE_FAILURE);
         }
 
-        Ok(false)
+        // Check if we've exceeded the failure limit
+        if consecutive_failure >= MAX_CONSECUTIVE_FAILURE {
+            return Err(format!("Too many consecutive failures ({}) while receiving piece blocks", consecutive_failure).into());
+        }
+
+        // Small delay before retrying
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
+
+    Ok(false)
+}
 
     pub async fn download_piece_blocks(
         &mut self,
@@ -294,6 +427,7 @@ impl PeerConnection {
         match self.receive_piece_block(total_blocks, actual_piece_length).await {
             Ok(is_complete) => {
                 if is_complete {
+                    println!("piece Completed {index}");
                     if let Err(e) = self
                         .check_integrity_and_save(
                             index,
@@ -360,6 +494,7 @@ impl PeerConnection {
             if pieces[index as usize]
                 == val.iter().map(|b| format!("{:02x}", b)).collect::<String>()
             {
+                print!("Integrity passed.");
                 // Function to save data to a file
                 if let Err(e) = self
                     .save_to_file(destination, flag, index, piece_len, &data)
@@ -367,7 +502,7 @@ impl PeerConnection {
                 {
                     eprintln!("Failed to save to file for index {index}. FurtherMore: {e}");
                 };
-                println!("Saved to destination for index: {index}");
+                print!("Saved to file. for {index}\n");
 
                 return Ok(());
             } else {
@@ -403,8 +538,6 @@ impl PeerConnection {
 
         file.write_all(&data).await?;
         file.flush().await?;
-
-        println!("written.");
 
         // Progress notifer
         // This sends as a notifier to the receiver, so that the receiver can now start to send a progress info to its receiver.
@@ -618,6 +751,8 @@ impl SwarmManager {
         ip_addr: Vec<String>,
         info_hash: Vec<u8>,
         peer_id: Vec<u8>,
+        file_size: usize,
+        piece_len: usize,
     ) {
         let mut tasks = vec![];
         self.self_peer_id = peer_id.iter().map(|b| format!("{:02x}", b)).collect();
@@ -638,36 +773,53 @@ impl SwarmManager {
             let notifier_tx = tx.clone();
             let semaphore = semaphore.clone();
             let unchoked_peers = unchoked_peers.clone();
+            let total_pieces = (file_size + piece_len - 1) / piece_len;
+
     
             tasks.push(tokio::spawn(async move {
                 let _permit = semaphore.acquire().await.expect("Failed to acquire semaphore");
     
                 match PeerConnection::init(addr).await {
                     Ok(mut conn) => match conn.init_handshaking(info_hash, self_peer_id).await {
-                        Ok(handshake) => {
-    
+                        Ok(handshake) => {                            
                             conn.bitfield_info.peer_id = handshake.remote_peer_id();
-                            
                             // Set up progress subscriber
                             conn.include_progress_subscriber(notifier_tx);
-        
+                            
                             let mut has_bitfield = false;
                             let mut has_unchoke = false;
                             let mut has_have = false;
+                            let mut sent_interested = false;
                             let mut timeout_counter = 0;
                             const MAX_TIMEOUT: u32 = 3;
-                            let mut message = conn.message.lock().await;
-                                
+
                             loop {
-                                match message.exchange_msg().await {
+
+                                let  msg_result = {
+                                    let mut message = conn.message.lock().await;
+                                    message.exchange_msg().await
+                                };
+
+                                match msg_result{
                                     Ok(_) => {
-                                        match &message.message_type {
-                                            MessageType::BitField(bitfield) => {
+                                        // POINTER
+                                        let message_type = {
+                                            let message = conn.message.lock().await;
+                                            message.message_type.clone()
+                                        };
+
+                                        match message_type {
+                                            MessageType::BitField(payload) => {
                                                 let mut piece_idx: HashSet<u32> = HashSet::new();
-                                                for (byte_idx, byte) in bitfield.iter().enumerate() {
+                                                for (byte_idx, byte) in payload.iter().enumerate() {
                                                     for bit in 0..8 {
                                                         if byte >> (7-bit) & 1 == 1 {
-                                                            piece_idx.insert(byte_idx as u32 * 8 + bit);
+                                                            let piece_index = byte_idx as u32 * 8 + bit;
+
+                                                            if piece_index >= total_pieces as u32{
+                                                                break;
+                                                            }
+                                                            piece_idx.insert(piece_index);
                                                         }  
                                                     }
                                                 }
@@ -675,20 +827,31 @@ impl SwarmManager {
                                                 has_bitfield = true;
                                                 timeout_counter = 0;
 
-                                                if let Err(e) = message.interested().await { 
+                                                // if let Err(e) = message.interested().await { 
+                                                let mut msg_guard = {
+                                                    conn.message.lock().await
+                                                };
+                                                if let Err(e) = msg_guard.interested().await { 
                                                     eprintln!("Failed to send interested message: {e}");
                                                     return;
-                                                }                
+                                                }
+                                                sent_interested = true;               
                                             }
     
                                             MessageType::Have(piece_index) => {
-                                                conn.bitfield_info.present_pieces.insert(*piece_index);
+                                                conn.bitfield_info.present_pieces.insert(piece_index);
                                                 has_have = true;
                                                 timeout_counter = 0;
 
-                                                if let Err(e) = message.interested().await { 
-                                                    eprintln!("Failed to send interested message: {e}");
-                                                    return;
+                                                if !sent_interested{
+                                                    let mut msg_guard = {
+                                                        conn.message.lock().await
+                                                    };
+                                                if let Err(e) = msg_guard.interested().await { 
+                                                        eprintln!("Failed to send interested message: {e}");
+                                                        return;
+                                                    }
+                                                    sent_interested = true;
                                                 }
                                             }
     
@@ -705,7 +868,29 @@ impl SwarmManager {
                                             }
     
                                             other => {
-                                                println!("Received message: {:?} from peer {}", other, handshake.remote_peer_id());
+
+                                                match other{
+                                                    MessageType::Unknown(id,_payload )=>{
+                                                        println!("Received UnKnown Message({id}) from peer {}",handshake.remote_peer_id());
+                                                    }
+                                                    
+                                                    MessageType::Choke=>{
+                                                        println!("Received Choked Message from peer {}",  handshake.remote_peer_id());
+
+                                                        let mut msg_guard = {
+                                                            conn.message.lock().await
+                                                        };
+                                                        if let Err(e) = msg_guard.interested().await { 
+                                                            eprintln!("Failed to send interested message: {e}");
+                                                            return;
+                                                        }
+                                                        sent_interested = true;               
+                                                    }
+
+                                                    o=>{
+                                                        println!("Received unhandled message type {o:?} from peer {}",  handshake.remote_peer_id());
+                                                    }
+                                                }
                                                 timeout_counter = 0;
                                             }
                                         }
@@ -728,19 +913,15 @@ impl SwarmManager {
                                 
                                 // Check timeout
                                 if timeout_counter >= MAX_TIMEOUT {
-                                    println!("TIMEOUT: No progress from peer {} for {} seconds, giving up", handshake.remote_peer_id(), MAX_TIMEOUT);
+                                    println!("TIMEOUT ON CONNECTION: No progress from peer {} for {} seconds, giving up", handshake.remote_peer_id(), MAX_TIMEOUT);
                                     break;
                                 }
 
-                                println!("Counter {timeout_counter}");
-                                
                                 // Small delay to prevent busy waiting
                                 tokio::time::sleep(Duration::from_millis(100)).await;
-                            }
+                            }    
     
-                            drop(message);
-    
-                            if has_bitfield || has_unchoke || has_have {
+                            if !(timeout_counter >= MAX_TIMEOUT) && (has_unchoke && (has_bitfield ||  has_have)) {
                                 let mut connections = connections.lock().await;
                                 
                                 connections.push(conn);
@@ -748,13 +929,14 @@ impl SwarmManager {
                         }
     
                         Err(e) => {
-                            eprintln!("Error occurred on initiating handshake: {e:?}");
+                            eprintln!("Error occurred on initiating handshake: {e:?}. Peer: {}", conn.bitfield_info.peer_id);
                             return;
                         }
                     },
     
                     Err(e) => {
-                        eprintln!("Failed to establish connection: {e:?}");
+                        eprintln!("Failed to establish connection while connecting to peer: {e:?}");
+                        return;
                     }
                 }
 
@@ -765,11 +947,11 @@ impl SwarmManager {
         for task in tasks {
             let _ = task.await;
         }
-    
+
         // To receive a call from PeerConnection, to send the progress info through the channel.
         if self.progress_tx.clone().is_some() {
             let this = Arc::new(self.clone());
-            this.progress_listener().await;
+            this.progress_listener();
         }
     
         self.info_hash = info_hash.iter().map(|b| format!("{:02X}", b)).collect()
@@ -806,7 +988,7 @@ impl SwarmManager {
         let mut peer_pieces: HashMap<String, Vec<u32>> = HashMap::new();
         let mut peer_load: HashMap<String, usize> = HashMap::new();
         for (piece_idx, mut peers) in rarest_pieces {
-            if peers.len() > 1 {
+            if peers.len() > 2 {
                 peers.shuffle(&mut rand::rng());
             }
 
@@ -836,10 +1018,9 @@ impl SwarmManager {
         pieces: &Vec<String>,
         piece_len: usize,
     ) {        
-        // Step 1: Select which pieces each peer will download
+        // which pieces each peer will download
         self.peer_pieces_selection().await;
                 
-        // Step 2: Validate we have peers to work with
         if self.peer_pieces.is_empty() {
             println!("ERROR: No peers with pieces available. Cannot start download.");
             return;
@@ -847,7 +1028,7 @@ impl SwarmManager {
         
         let total_pieces = (file_size + piece_len - 1) / piece_len;
     
-        //  Set up shared state for download tasks
+        //<<  Set up shared state for download tasks
         let completed_pieces = Arc::clone(&self.completed_pieces);
         // let unchoked_peers = Arc::clone(&self.unchoked_peers);
         let mut tasks = Vec::new();
@@ -855,6 +1036,7 @@ impl SwarmManager {
         let destination = Arc::new(self.destination.clone());
         let pieces = Arc::new(pieces.clone());
         let connections = self.connections.clone();
+        //>>
     
         //  Initialize download manager
         let download_manager = Arc::clone(&self.download_manager);
@@ -866,7 +1048,6 @@ impl SwarmManager {
                 .await;
         }
     
-        // Create download tasks for each peer
         let semaphore = Arc::new(Semaphore::new(5)); // Limit concurrent downloads
     
         for (peer, indexes) in &self.peer_pieces.clone() {
@@ -889,10 +1070,8 @@ impl SwarmManager {
                 let _permit = semaphore.acquire().await.expect("Could not acquire semaphore");
     
                 for index in indexes {
-                    
                     // Add timeout for each piece download
-                    match tokio::time::timeout(Duration::from_secs(60), async {
-                        // Find the peer connection and verify it's ready
+                    match tokio::time::timeout(Duration::from_secs(300), async {
                         let mut connections = connections.lock().await;
                         if let Some(conn) = connections
                             .iter_mut()
@@ -900,6 +1079,7 @@ impl SwarmManager {
                         {
                             // Verify peer has this piece
                             if !conn.bitfield_info.present_pieces.contains(&index) {
+                                println!("This peer doesnot have requested index {index}. Returned");
                                 return Ok(());
                             }
 
@@ -928,6 +1108,8 @@ impl SwarmManager {
                             // Success
                             let mut completed = completed_pieces.write().await;
                             completed.insert(index);
+
+                            println!("Piece {} downloaded from peer {}", index, peer);
                         }
                         Ok(Err(e)) => {
                             eprintln!("ERROR: Failed to download piece {} from peer {}: {e}", index, peer);
@@ -950,7 +1132,6 @@ impl SwarmManager {
                 match task.await {
                     Ok(_) => {
                         completed_count += 1;
-                        println!("Download task completed successfully");
                     }
                     Err(e) => {
                         failed_count += 1;
@@ -1035,10 +1216,15 @@ mod test_connection {
 
         let mut dm = SwarmManager::init();
 
+        let file_size =             length.unwrap().clone();
+        let piece_length =             meta.info.piece_length;
+
         dm.connect_and_exchange_bitfield(
             ip_addr,
             info_hash.to_vec(),
             self_peer_id.as_bytes().to_vec(),
+            file_size,
+            piece_length,
         )
         .await;
 
@@ -1046,9 +1232,9 @@ mod test_connection {
         let path = temp_dir().join("testing.iso").to_string_lossy().to_string();
         dm.destination(path)
             .final_peer_msg(
-                length.unwrap().clone(),
+                file_size,
                 &meta.info.pieces_hashes(),
-                meta.info.piece_length,
+                piece_length,
             )
             .await;
     }

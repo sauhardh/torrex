@@ -68,7 +68,7 @@ pub enum MessageType {
     Unknown(u8, Vec<u8>), // Fallback
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Messages {
     stream: Arc<Mutex<TcpStream>>,
     pub message_type: MessageType,
@@ -82,9 +82,7 @@ impl Messages {
         }
     }
 
-    pub async fn exchange_msg(
-        &mut self,
-    ) -> Result<Option<&Self>, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn exchange_msg(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut msg: [u8; 5] = [0u8; 5];
 
         let mut stream = self.stream.lock().await;
@@ -95,7 +93,8 @@ impl Messages {
 
         if msg_len == 0 {
             self.message_type = MessageType::Unknown(0, vec![]);
-            return Ok(None);
+            // return Ok(None);
+            return Ok(());
         }
         let mut payload = vec![0u8; (msg_len - 1) as usize];
         stream.read_exact(&mut payload).await?;
@@ -166,7 +165,8 @@ impl Messages {
 
         // println!("\n_______message {:?}\n", message);
         self.message_type = message;
-        Ok(Some(self))
+        // Ok(Some(self))
+        Ok(())
     }
 
     pub async fn wait_have(&mut self) -> Option<u32> {
@@ -208,25 +208,21 @@ impl Messages {
         Ok(())
     }
 
-    pub async fn wait_unchoke<'a>(&'a mut self) -> bool {
-        match timeout(Duration::from_secs(20), self.exchange_msg()).await {
-            Ok(Ok(Some(msg))) if msg.message_type == MessageType::Unchoke => true,
-            Ok(Ok(_)) => false,
-
-            Err(_) | Ok(Err(_)) => {
-                eprintln!(" Error on waiting to receive `Unchoke` message within time");
-                false
-            }
-        }
-    }
-
     pub async fn wait_piece_block(&mut self) -> Option<MessageType> {
-        match self.exchange_msg().await {
-            Ok(_) => Some(self.message_type.clone()),
-            Err(e) => {
-                eprintln!("Error on waiting to receive `Piece` message. FurtherMore: {e}");
-                None
+        if let Ok(result) = timeout(Duration::from_secs(15), async {
+            match self.exchange_msg().await {
+                Ok(_) => Some(self.message_type.clone()),
+                Err(e) => {
+                    eprintln!("Error on waiting to receive `Piece` message. FurtherMore: {e}");
+                    None
+                }
             }
+        })
+        .await
+        {
+            result
+        } else {
+            None
         }
     }
 

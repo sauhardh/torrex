@@ -318,6 +318,8 @@ impl ExtendedMetadataExchange {
 #[cfg(test)]
 mod test_extdmetadataexchange {
 
+    use std::env::temp_dir;
+
     use crate::connection::connection::SwarmManager;
     use crate::extension::magnet_link::ExtendedExchange;
     use crate::extension::magnet_link::ExtendedMetadataExchange;
@@ -383,15 +385,32 @@ mod test_extdmetadataexchange {
         };
 
         let mut sm = SwarmManager::init();
-        sm.connect_and_exchange_bitfield(ips, info_hash.to_vec(), self_peer_id.as_bytes().to_vec())
-            .await;
+        // sm.connect_and_exchange_bitfield(ips, info_hash.to_vec(), self_peer_id.as_bytes().to_vec())
+        //     .await;
 
-        sm.destination(format!("{}{}", "/tmp/", info.1.name))
-            .final_peer_msg(
-                length.unwrap().clone(),
-                &info.1.pieces_hashes(),
-                info.1.piece_length,
-            )
+        // sm.destination(format!("{}{}", "/tmp/", info.1.name))
+        //     .final_peer_msg(
+        //         length.unwrap().clone(),
+        //         &info.1.pieces_hashes(),
+        //         info.1.piece_length,
+        //     )
+        //     .await;
+
+        let file_size = length.unwrap().clone();
+        let piece_length = info.1.piece_length;
+
+        sm.connect_and_exchange_bitfield(
+            ips,
+            info_hash.to_vec(),
+            self_peer_id.as_bytes().to_vec(),
+            file_size,
+            piece_length,
+        )
+        .await;
+
+        let path = temp_dir().join("testing.iso").to_string_lossy().to_string();
+        sm.destination(path)
+            .final_peer_msg(file_size, &info.1.pieces_hashes(), piece_length)
             .await;
     }
 }

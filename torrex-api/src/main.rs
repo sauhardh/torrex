@@ -17,7 +17,10 @@ use state::AppState;
 
 use crate::controller::download_progress;
 use crate::controller::init;
+use crate::controller::pause_download;
+use crate::controller::resume_download;
 use crate::controller::start_download;
+use crate::controller::stop_download;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -43,7 +46,10 @@ async fn main() -> std::io::Result<()> {
                     .service(initial_download_info_magnet)
                     .service(initial_download_info_metafile)
                     .service(start_download)
-                    .service(download_progress),
+                    .service(download_progress)
+                    .service(pause_download)
+                    .service(resume_download)
+                    .service(stop_download),
             )
             .wrap(middleware::NormalizePath::trim())
             .wrap(middleware::Logger::default())
