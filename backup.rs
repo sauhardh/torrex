@@ -31,77 +31,6 @@ use crate::utils::config::config_dir;
 
 const BLOCK_SIZE: u32 = 16_384;
 
-// Fix 1: Update PeerHealth to include connection state
-#[derive(Debug, Clone)]
-pub struct PeerHealth {
-    pub last_seen: std::time::Instant,
-    pub failed_requests: u32,
-    pub successful_requests: u32,
-    pub download_speed: f64,
-    pub is_choked: bool,
-    pub is_interested: bool,
-    pub connection_established: bool,  // NEW: Track if handshake completed
-    pub handshake_completed_at: Option<std::time::Instant>,  // NEW: When handshake finished
-}
-
-impl PeerHealth {
-    pub fn new() -> Self {
-        Self {
-            last_seen: std::time::Instant::now(),
-            failed_requests: 0,
-            successful_requests: 0,
-            download_speed: 0.0,
-            is_choked: true,  // Start as choked
-            is_interested: false,
-            connection_established: false,  // NEW
-            handshake_completed_at: None,  // NEW
-        }
-    }
-
-    pub fn is_healthy(&self) -> bool {
-        let now = std::time::Instant::now();
-        let time_since_last_seen = now.duration_since(self.last_seen);
-
-        // NEW LOGIC: More lenient health checks
-        let time_ok = time_since_last_seen < Duration::from_secs(300); // 5 minutes
-        
-        // If handshake not completed, be more lenient
-        if !self.connection_established {
-            return time_since_last_seen < Duration::from_secs(60); // 1 minute grace period
-        }
-        
-        // After handshake, check if we have any activity
-        let has_activity = self.successful_requests > 0 || self.failed_requests > 0;
-        
-        // If no activity yet, consider healthy for 2 minutes after handshake
-        if !has_activity {
-            if let Some(handshake_time) = self.handshake_completed_at {
-                return now.duration_since(handshake_time) < Duration::from_secs(120);
-            }
-        }
-        
-        // If we have activity, check success rate
-        let success_rate_ok = if self.successful_requests + self.failed_requests > 0 {
-            (self.failed_requests as f64 / (self.successful_requests + self.failed_requests) as f64) < 0.7 // More lenient: 70% failure rate
-        } else {
-            true
-        };
-
-        time_ok && success_rate_ok
-    }
-}
-
-
-#[derive(Debug, Clone)]
-pub struct PendingRequest {
-    pub piece_index: u32,
-    pub begin: u32,
-    pub length: u32,
-    pub requested_at: std::time::Instant,
-    pub peer_id: String,
-}
-
-
 #[derive(Debug, Clone)]
 pub struct BitFieldInfo {
     pub peer_id: String,
@@ -132,10 +61,6 @@ pub struct PeerConnection {
     block_book: Arc<RwLock<HashMap<u32, usize>>>,
 
     progress_notifier_tx: Option<Sender<()>>,
-
-    pub health : Arc<RwLock<PeerHealth>>,
-    pub pending_requests: Arc<RwLock<Vec<PendingRequest>>>,
-
 }
 
 impl PeerConnection {
@@ -172,74 +97,7 @@ impl PeerConnection {
             block_storage: Arc::new(RwLock::new(HashMap::new())),
             block_book: Arc::new(RwLock::new(HashMap::new())),
             progress_notifier_tx: None,
-
-            health: Arc::new(RwLock::new(PeerHealth::new())),
-            pending_requests: Arc::new(RwLock::new(Vec::new())),
-
         })
-    }
-
-        // Add this method
-        pub async fn send_keep_alive(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            let mut stream = self.stream.lock().await;
-            stream.write_all(&[0, 0, 0, 0]).await?;
-            Ok(())
-        }
-        
-        // Add this method to update health on successful operations
-        pub async fn update_health_success(&self) {
-            let mut health = self.health.write().await;
-            health.last_seen = std::time::Instant::now();
-            health.successful_requests += 1;
-            health.failed_requests = 0; // Reset failures on success
-        }
-        
-        // Add this method to update health on failures
-        pub async fn update_health_failure(&self) {
-            let mut health = self.health.write().await;
-            health.failed_requests += 1;
-        }
-    
-
-    async fn send_request_with_timeout(
-        &self,
-        index: u32,
-        length: usize,
-        begin: usize,
-        timeout_duration: Duration,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Add to pending requests
-        {
-            let mut pending = self.pending_requests.write().await;
-            pending.push(PendingRequest {
-                piece_index: index,
-                begin: begin as u32,
-                length: length as u32,
-                requested_at: std::time::Instant::now(),
-                peer_id: self.bitfield_info.peer_id.clone(),
-            });
-        }
-
-        // Send request with timeout
-        match timeout(timeout_duration, self.send_request(index, length, begin)).await {
-            Ok(result) => result,
-            Err(_) => {
-                // Remove from pending requests
-                {
-                    let mut pending = self.pending_requests.write().await;
-                    pending.retain(|req| !(req.piece_index == index && req.begin == begin as u32));
-                }
-                Err("Request timeout".into())
-            }
-        }
-    }
-
-    async fn cleanup_expired_requests(&self) {
-        let now = std::time::Instant::now();
-        let timeout_duration = Duration::from_secs(30); // 30 seconds timeout
-
-        let mut pending = self.pending_requests.write().await;
-        pending.retain(|req| now.duration_since(req.requested_at) < timeout_duration);
     }
 
     pub fn include_progress_subscriber(&mut self, progress_tx: Sender<()>) -> &Self {
@@ -418,122 +276,124 @@ impl PeerConnection {
 
     //     Ok(false)
     // }
+
     #[inline]
-    async fn receive_piece_block(
-        &mut self,
-        total_blocks: usize,
-        actual_piece_length: usize,
-    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-        let mut received_blocks = 0;
-        let mut consecutive_failure = 0;
-        const MAX_CONSECUTIVE_FAILURE: i32 = 3;
-        let mut last_progress = std::time::Instant::now();
-        const PROGRESS_TIMEOUT: Duration = Duration::from_secs(60); // 1 minute
-    
-        while received_blocks < total_blocks {
-            // Check for overall timeout
-            if last_progress.elapsed() > PROGRESS_TIMEOUT {
-                return Err("Piece download timeout - no progress for 1 minute".into());
-            }
-    
-            // Clean up expired requests
-            self.cleanup_expired_requests().await;
-    
-            let output = {
-                let mut message = self.message.lock().await;
-                message.wait_piece_block().await
-            };
-    
-            if let Some(pb) = output {
-                match pb {
-                    MessageType::Piece { index, begin, block } => {
-                        // Remove from pending requests
-                        {
-                            let mut pending = self.pending_requests.write().await;
-                            pending.retain(|req| !(req.piece_index == index && req.begin == begin));
-                        }
-    
-                        // Update peer health
-                        {
-                            let mut health = self.health.write().await;
-                            health.successful_requests += 1;
-                            health.last_seen = std::time::Instant::now();
-                        }
-    
-                        // Store the block
-                        {
-                            let mut storage = self.block_storage.write().await;
-                            storage.entry(index).or_default().insert(begin, block.clone());
-                        }
-    
-                        {
-                            let mut book = self.block_book.write().await;
-                            book.entry(index)
-                                .and_modify(|l| *l += block.len())
-                                .or_insert(block.len());
-                        }
-    
-                        received_blocks += 1;
-                        consecutive_failure = 0;
-                        last_progress = std::time::Instant::now();
-    
-                        // Check if piece is complete
-                        let is_complete = {
-                            let book = self.block_book.read().await;
-                            *book.get(&index).unwrap_or(&0) >= actual_piece_length
-                        };
-    
-                        if is_complete {
-                            return Ok(true);
-                        }
+async fn receive_piece_block(
+    &mut self,
+    total_blocks: usize,
+    actual_piece_length: usize,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let mut received_blocks = 0;
+    let mut consecutive_failure = 0;
+    const MAX_CONSECUTIVE_FAILURE: i32 = 5; // Increased from 2 to 5
+
+    while received_blocks < total_blocks {
+        let output = {
+            let mut message = self.message.lock().await;
+            message.wait_piece_block().await
+        };
+        print!("waiting piece block done!! for {received_blocks} / {total_blocks}...\n");
+
+        if let Some(pb) = output {
+            match pb {
+                MessageType::Piece {
+                    index,
+                    begin,
+                    block,
+                } => {
+                    {
+                        let mut storage = self.block_storage.write().await;
+                        storage
+                            .entry(index)
+                            .or_default()
+                            .insert(begin, block.clone());
                     }
-                    
-                    MessageType::Unknown(0, _) => {
-                        // Keep-alive message
-                        last_progress = std::time::Instant::now();
-                        continue;
+
+                    {
+                        let mut book = self.block_book.write().await;
+                        book.entry(index)
+                            .and_modify(|l| *l += block.len())
+                            .or_insert(block.len());
+                        print!("Book {:?}", book.get(&index));
+                        print!("/ Piece_length {}\n", actual_piece_length);
                     }
-                    
-                    MessageType::Choke => {
-                        // Update health
-                        {
-                            let mut health = self.health.write().await;
-                            health.is_choked = true;
-                            health.last_seen = std::time::Instant::now();
-                        }
-                        consecutive_failure += 1;
-                    }
-                    
-                    MessageType::Unchoke => {
-                        // Update health
-                        {
-                            let mut health = self.health.write().await;
-                            health.is_choked = false;
-                            health.last_seen = std::time::Instant::now();
-                        }
-                        consecutive_failure = 0;
-                    }
-                    
-                    other => {
-                        eprintln!("Unexpected message during piece download: {:?}", other);
-                        consecutive_failure += 1;
+
+                    received_blocks += 1;
+                    consecutive_failure = 0; // Reset failure counter on success
+
+                    // Check if piece is complete
+                    let is_complete = {
+                        let book = self.block_book.read().await;
+                        *book.get(&index).unwrap_or(&0) >= actual_piece_length
+                    };
+
+                    if is_complete {
+                        return Ok(true);
                     }
                 }
-            } else {
-                // Timeout occurred
-                consecutive_failure += 1;
+                
+                // Handle keep-alive messages gracefully
+                MessageType::Unknown(0, _) => {
+                    // This is a keep-alive message, not an error
+                    println!("Received keep-alive message, continuing...");
+                    consecutive_failure = 0; // Reset failure counter
+                    continue;
+                }
+                
+                // Handle other non-error messages
+                MessageType::Choke => {
+                    println!("Received choke message during piece download");
+                    consecutive_failure += 1;
+                }
+                
+                MessageType::Unchoke => {
+                    println!("Received unchoke message during piece download");
+                    consecutive_failure = 0; // Reset failure counter
+                }
+                
+                MessageType::Have(_) => {
+                    println!("Received have message during piece download");
+                    consecutive_failure = 0; // Reset failure counter
+                }
+                
+                MessageType::BitField(_) => {
+                    println!("Received bitfield message during piece download");
+                    consecutive_failure = 0; // Reset failure counter
+                }
+                
+                MessageType::Interested | MessageType::NotInterested => {
+                    println!("Received interest message during piece download");
+                    consecutive_failure = 0; // Reset failure counter
+                }
+                
+                MessageType::Extended(_, _) => {
+                    println!("Received extended message during piece download");
+                    consecutive_failure = 0; // Reset failure counter
+                }
+                
+                // Handle actual errors
+                other => {
+                    println!("Unexpected message during piece download: {other:?}");
+                    consecutive_failure += 1;
+                }
             }
-    
-            if consecutive_failure >= MAX_CONSECUTIVE_FAILURE {
-                return Err(format!("Too many consecutive failures ({}) while receiving piece blocks", consecutive_failure).into());
-            }
-    
-            // Small delay before retrying
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        } else {
+            // Timeout occurred
+            consecutive_failure += 1;
+            println!("Timeout waiting for piece block, retry {}/{}", consecutive_failure, MAX_CONSECUTIVE_FAILURE);
         }
-    
-        Ok(false)
+
+        // Check if we've exceeded the failure limit
+        if consecutive_failure >= MAX_CONSECUTIVE_FAILURE {
+            return Err(format!("Too many consecutive failures ({}) while receiving piece blocks", consecutive_failure).into());
+        }
+
+        // Small delay before retrying
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
+
+    Ok(false)
+}
 
     pub async fn download_piece_blocks(
         &mut self,
@@ -775,72 +635,6 @@ impl SwarmManager {
         self
     }
 
-    async fn get_best_peer_for_piece(&self, piece_index: u32) -> Option<String> {
-        let connections = self.connections.lock().await;
-        let mut available_peers: Vec<(String, f64)> = Vec::new();
-    
-        for conn in connections.iter() {
-            if conn.bitfield_info.present_pieces.contains(&piece_index) {
-                let health = conn.health.read().await;
-                if health.is_healthy() && !health.is_choked && health.connection_established {
-                    available_peers.push((
-                        conn.bitfield_info.peer_id.clone(),
-                        health.download_speed
-                    ));
-                }
-            }
-        }
-    
-        // Sort by download speed (highest first)
-        available_peers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        
-        if available_peers.is_empty() {
-            None
-        } else {
-            available_peers.first().map(|(peer_id, _)| peer_id.clone())
-        }
-    }
-
-    async fn retry_piece_with_different_peers(&self, piece_index:u32, failed_peer: &str, pieces: &[String], file_size: usize, piece_len: usize)->   Result<(),Box<dyn std::error::Error + Send + Sync>>{
-
-        // Mark the failed peer as unhealthy
-        {
-            let connections = self.connections.lock().await;
-            if let Some(conn) = connections.iter().find(|c| c.bitfield_info.peer_id == failed_peer) {
-                let mut health = conn.health.write().await;
-                health.failed_requests += 1;
-            }
-        }
-
-                // Try with a different peer
-                if let Some(best_peer) = self.get_best_peer_for_piece(piece_index).await {
-                    let mut connections = self.connections.lock().await;
-                    if let Some(conn) = connections.iter_mut().find(|c| c.bitfield_info.peer_id == best_peer) {
-                        // Calculate piece length
-                        let total_pieces = (file_size + piece_len - 1) / piece_len;
-                        let actual_piece_length = if piece_index as usize == total_pieces - 1 {
-                            file_size - (piece_index as usize * piece_len)
-                        } else {
-                            piece_len
-                        };
-        
-                        // Try downloading from this peer
-                        conn.download_piece_blocks(
-                            piece_index,
-                            pieces,
-                            actual_piece_length,
-                            &self.destination,
-                            piece_len as u32,
-                            Some("download".to_string()),
-                        ).await
-                    } else {
-                        Err("No healthy peer found for piece".into())
-                    }
-                } else {
-                    Err("No available peers for piece".into())
-                }
-    }
-
     /// To subscribe for the progress updates. Must be called right after initialization of  [`SwarmManager`] struct.
     ///
     /// This will send a real time information through channel. A `Sender` must be passed as parameter.
@@ -952,44 +746,6 @@ impl SwarmManager {
         Ok(path)
     }
 
-      // Replace the existing start_connection_monitor method (around line 987)
-      pub async fn start_connection_monitor(self: Arc<Self>) {
-        let connections = Arc::clone(&self.connections);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(300)); // 5 minutes instead of 2
-            loop {
-                interval.tick().await;
-                
-                let mut conns = connections.lock().await;
-                let mut to_remove = Vec::new();
-                
-                for (i, conn) in conns.iter_mut().enumerate() {
-                    let health = conn.health.read().await;
-                    
-                    // Only send keep-alive if handshake is completed
-                    if health.connection_established {
-                        if let Err(_) = conn.send_keep_alive().await {
-                            to_remove.push(i);
-                            continue;
-                        }
-                    }
-                    
-                    // Check health with more lenient criteria
-                    if !health.is_healthy() {
-                        to_remove.push(i);
-                    }
-                }
-                
-                // Remove dead connections
-                for &index in to_remove.iter().rev() {
-                    let conn = conns.remove(index);
-                    println!("Removing unhealthy connection: {}", conn.bitfield_info.peer_id);
-                }
-            }
-        });
-    }
-
-
     pub async fn connect_and_exchange_bitfield(
         &mut self,
         ip_addr: Vec<String>,
@@ -1059,7 +815,7 @@ impl SwarmManager {
                                                     for bit in 0..8 {
                                                         if byte >> (7-bit) & 1 == 1 {
                                                             let piece_index = byte_idx as u32 * 8 + bit;
-                                            
+
                                                             if piece_index >= total_pieces as u32{
                                                                 break;
                                                             }
@@ -1070,15 +826,8 @@ impl SwarmManager {
                                                 conn.bitfield_info.present_pieces = piece_idx.clone();
                                                 has_bitfield = true;
                                                 timeout_counter = 0;
-                                            
-                                                // NEW: Mark connection as established when we get bitfield
-                                                {
-                                                    let mut health = conn.health.write().await;
-                                                    health.connection_established = true;
-                                                    health.handshake_completed_at = Some(std::time::Instant::now());
-                                                    health.last_seen = std::time::Instant::now();
-                                                }
-                                            
+
+                                                // if let Err(e) = message.interested().await { 
                                                 let mut msg_guard = {
                                                     conn.message.lock().await
                                                 };
@@ -1093,53 +842,31 @@ impl SwarmManager {
                                                 conn.bitfield_info.present_pieces.insert(piece_index);
                                                 has_have = true;
                                                 timeout_counter = 0;
-                                            
-                                                // NEW: Mark connection as established when we get have message
-                                                {
-                                                    let mut health = conn.health.write().await;
-                                                    health.connection_established = true;
-                                                    health.handshake_completed_at = Some(std::time::Instant::now());
-                                                    health.last_seen = std::time::Instant::now();
-                                                }
-                                            
+
                                                 if !sent_interested{
                                                     let mut msg_guard = {
                                                         conn.message.lock().await
                                                     };
-                                                    if let Err(e) = msg_guard.interested().await { 
+                                                if let Err(e) = msg_guard.interested().await { 
                                                         eprintln!("Failed to send interested message: {e}");
                                                         return;
                                                     }
                                                     sent_interested = true;
                                                 }
                                             }
+    
                                             MessageType::Unchoke => {
                                                 has_unchoke = true;
                                                 unchoked_peers.write().await.insert(handshake.remote_peer_id());
                                                 timeout_counter = 0;
-                                            
-                                                // Update health - mark as unchoked and successful
-                                                {
-                                                    let mut health = conn.health.write().await;
-                                                    health.is_choked = false;
-                                                    health.last_seen = std::time::Instant::now();
-                                                    health.successful_requests += 1;
-                                                    health.connection_established = true;  // NEW: Mark as established
-                                                    health.handshake_completed_at = Some(std::time::Instant::now());  // NEW: Record time
-                                                }
-                                            
-                                                println!("SUCCESS: Got unchoke from {} - peer is ready for download!", handshake.remote_peer_id());
+
+                                                println!("Got unchoke from peer {}", handshake.remote_peer_id());
                                             }
-                                        
+    
                                             MessageType::Choke => {
                                                 println!("Got choked by peer {}", handshake.remote_peer_id());
-                                                // Update health - mark as choked
-                                                {
-                                                    let mut health = conn.health.write().await;
-                                                    health.is_choked = true;
-                                                }
                                             }
-                                        
+    
                                             other => {
 
                                                 match other{
@@ -1173,6 +900,7 @@ impl SwarmManager {
                                             println!("SUCCESS: Got unchoke from {} - peer is ready for download!", handshake.remote_peer_id());
                                             break;
                                         }
+                                        
                                     }
                                     Err(e) => {
                                         eprintln!("Error exchanging message with {}: {e}", handshake.remote_peer_id());
@@ -1193,19 +921,10 @@ impl SwarmManager {
                                 tokio::time::sleep(Duration::from_millis(100)).await;
                             }    
     
-                            // if !(timeout_counter >= MAX_TIMEOUT) && (has_unchoke && (has_bitfield ||  has_have)) {
-                            //     let mut connections = connections.lock().await;
-                                
-                            //     connections.push(conn);
-                            // }
-                            // After successful connection setup
-                            if has_unchoke && (has_bitfield || has_have) {
+                            if !(timeout_counter >= MAX_TIMEOUT) && (has_unchoke && (has_bitfield ||  has_have)) {
                                 let mut connections = connections.lock().await;
-                                connections.push(conn.clone());
                                 
-                                // Start keep-alive sender for this connection
-                                let messages = Arc::clone(&conn.message);
-                                Messages::start_keep_alive_sender(messages);
+                                connections.push(conn);
                             }
                         }
     
@@ -1292,126 +1011,152 @@ impl SwarmManager {
 
         self.peer_pieces = peer_pieces;
     }
-// Replace your current final_peer_msg function with this improved version:
-pub async fn final_peer_msg(
-    &mut self,
-    file_size: usize,
-    pieces: &Vec<String>,
-    piece_len: usize,
-) {        
-    // Start connection monitoring
-    let self_arc = Arc::new(self.clone());
-    self_arc.start_connection_monitor().await;
-    
-    // which pieces each peer will download
-    self.peer_pieces_selection().await;
-            
-    if self.peer_pieces.is_empty() {
-        println!("ERROR: No peers with pieces available. Cannot start download.");
-        return;
-    }
-    
-    let total_pieces = (file_size + piece_len - 1) / piece_len;
-    let mut pending_pieces: Vec<u32> = (0..total_pieces as u32).collect();
-    let mut failed_pieces: Vec<u32> = Vec::new();
-    let mut retry_count: HashMap<u32, u32> = HashMap::new();
-    const MAX_RETRIES: u32 = 3;
 
-    println!("Starting download of {} pieces with {} peers", total_pieces, self.peer_pieces.len());
-
-    while !pending_pieces.is_empty() || !failed_pieces.is_empty() {
-        // Process failed pieces first
-        if !failed_pieces.is_empty() {
-            let piece = failed_pieces.remove(0);
-            
-            // FIXED: Get the current retry count without borrowing
-            let current_retries = *retry_count.get(&piece).unwrap_or(&0);
-            
-            if current_retries < MAX_RETRIES {
-                retry_count.insert(piece, current_retries + 1);
-                pending_pieces.push(piece);
-                println!("Retrying piece {} (attempt {}/{})", piece, current_retries + 1, MAX_RETRIES);
-            } else {
-                eprintln!("Piece {} failed after {} retries, giving up", piece, MAX_RETRIES);
-            }
+    pub async fn final_peer_msg(
+        &mut self,
+        file_size: usize,
+        pieces: &Vec<String>,
+        piece_len: usize,
+    ) {        
+        // which pieces each peer will download
+        self.peer_pieces_selection().await;
+                
+        if self.peer_pieces.is_empty() {
+            println!("ERROR: No peers with pieces available. Cannot start download.");
+            return;
         }
         
-        if pending_pieces.is_empty() {
-            break;
+        let total_pieces = (file_size + piece_len - 1) / piece_len;
+    
+        //<<  Set up shared state for download tasks
+        let completed_pieces = Arc::clone(&self.completed_pieces);
+        // let unchoked_peers = Arc::clone(&self.unchoked_peers);
+        let mut tasks = Vec::new();
+    
+        let destination = Arc::new(self.destination.clone());
+        let pieces = Arc::new(pieces.clone());
+        let connections = self.connections.clone();
+        //>>
+    
+        //  Initialize download manager
+        let download_manager = Arc::clone(&self.download_manager);
+        {
+            download_manager
+                .lock()
+                .await
+                .update_state_downloading()
+                .await;
         }
-        
-        let piece_index = pending_pieces.remove(0);
-        
-        // Find best peer for this piece
-        if let Some(best_peer) = self.get_best_peer_for_piece(piece_index).await {
-            println!("Attempting piece {} with peer {}", piece_index, best_peer);
-            
-            let mut connections = self.connections.lock().await;
-            if let Some(conn) = connections.iter_mut().find(|c| c.bitfield_info.peer_id == best_peer) {
-                // Calculate piece length
-                let actual_piece_length = if piece_index as usize == total_pieces - 1 {
-                    file_size - (piece_index as usize * piece_len)
-                } else {
-                    piece_len
-                };
+    
+        let semaphore = Arc::new(Semaphore::new(5)); // Limit concurrent downloads
+    
+        for (peer, indexes) in &self.peer_pieces.clone() {
+            let connections = Arc::clone(&connections);
+            let destination = Arc::clone(&destination);
+            let completed_pieces = Arc::clone(&completed_pieces);
+            //let unchoked_peers = Arc::clone(&unchoked_peers);
+            let pieces = Arc::clone(&pieces);
+            // let download_manager = Arc::clone(&download_manager);
+            let semaphore = semaphore.clone();
+    
+            let indexes = indexes.clone();
+            let peer = peer.clone();
 
-                // Try downloading with timeout
-                match tokio::time::timeout(Duration::from_secs(300), async {
-                    conn.download_piece_blocks(
-                        piece_index,
-                        pieces,
-                        actual_piece_length,
-                        &self.destination,
-                        piece_len as u32,
-                        Some("download".to_string()),
-                    ).await
-                }).await {
-                    Ok(Ok(_)) => {
-                        // Success - update health and mark as completed
-                        conn.update_health_success().await;
-                        self.completed_pieces.write().await.insert(piece_index);
-                        println!("✅ Piece {} downloaded from peer {}", piece_index, best_peer);
-                    }
-                    Ok(Err(e)) => {
-                        // Failure - update health and retry
-                        conn.update_health_failure().await;
-                        eprintln!("❌ Failed to download piece {} from peer {}: {e}", piece_index, best_peer);
-                        failed_pieces.push(piece_index);
-                    }
-                    Err(_) => {
-                        // Timeout - update health and retry
-                        conn.update_health_failure().await;
-                        eprintln!("⏰ Timeout downloading piece {} from peer {}", piece_index, best_peer);
-                        failed_pieces.push(piece_index);
+            // let info_hash = self.info_hash.clone();
+            // let peer_pieces = self.peer_pieces.clone();
+
+    
+            tasks.push(tokio::spawn(async move {
+                let _permit = semaphore.acquire().await.expect("Could not acquire semaphore");
+    
+                for index in indexes {
+                    // Add timeout for each piece download
+                    match tokio::time::timeout(Duration::from_secs(300), async {
+                        let mut connections = connections.lock().await;
+                        if let Some(conn) = connections
+                            .iter_mut()
+                            .find(|x| x.bitfield_info.peer_id == *peer)
+                        {
+                            // Verify peer has this piece
+                            if !conn.bitfield_info.present_pieces.contains(&index) {
+                                println!("This peer doesnot have requested index {index}. Returned");
+                                return Ok(());
+                            }
+
+                            // Calculate piece length
+                            let actual_piece_length = if index as usize == total_pieces - 1 {
+                                file_size - (index as usize * piece_len)
+                            } else {
+                                piece_len
+                            };
+
+                            // Download the piece
+                            conn.download_piece_blocks(
+                                index,
+                                &pieces,
+                                actual_piece_length,
+                                &destination,
+                                piece_len as u32,
+                                Some("download".to_string()),
+                            ).await
+                        } else {
+                            eprintln!("ERROR: Could not find connection for peer {}", peer);
+                            return Ok(());
+                        }
+                    }).await {
+                        Ok(Ok(_)) => {
+                            // Success
+                            let mut completed = completed_pieces.write().await;
+                            completed.insert(index);
+
+                            println!("Piece {} downloaded from peer {}", index, peer);
+                        }
+                        Ok(Err(e)) => {
+                            eprintln!("ERROR: Failed to download piece {} from peer {}: {e}", index, peer);
+                        }
+                        Err(_) => {
+                            eprintln!("TIMEOUT: Piece {} download timed out for peer {}", index, peer);
+                        }
                     }
                 }
-            } else {
-                eprintln!("❌ Peer {} not found in connections for piece {}", best_peer, piece_index);
-                failed_pieces.push(piece_index);
-            }
-        } else {
-            // NEW: Add detailed debugging for when no peer is found
-            let connections = self.connections.lock().await;
-            println!("❌ No peer found for piece {}. Available peers:", piece_index);
-            for conn in connections.iter() {
-                let health = conn.health.read().await;
-                println!("  - Peer {}: has_piece={}, healthy={}, choked={}, established={}", 
-                    conn.bitfield_info.peer_id,
-                    conn.bitfield_info.present_pieces.contains(&piece_index),
-                    health.is_healthy(),
-                    health.is_choked,
-                    health.connection_established
-                );
-            }
-            failed_pieces.push(piece_index);
-        }
-    }
     
-    // Final status
-    let completed = self.completed_pieces.read().await;
-    println!("__Download summary: {} pieces completed, {} pieces failed__ at {}", 
-            completed.len(), failed_pieces.len(), self.destination);
-}
+                drop(_permit);
+            }));
+        }
+    
+
+            let mut completed_count = 0;
+            let mut failed_count = 0;
+            
+            for task in tasks {
+                match task.await {
+                    Ok(_) => {
+                        completed_count += 1;
+                    }
+                    Err(e) => {
+                        failed_count += 1;
+                        eprintln!("Download task failed: {e}");
+                    }
+                }
+            }
+            
+            // Final status and cleanup
+            {
+                let completed = completed_pieces.read().await;
+                println!("__Download summary: {} pieces completed, {} tasks succeeded, {} tasks failed__ at {}", 
+                        completed.len(), completed_count, failed_count, destination);
+            }
+            
+            // Update download manager state
+            {
+                let  dm = download_manager.lock().await;
+                if completed_pieces.read().await.len() >= total_pieces {
+                    dm.update_state_completed().await;
+                } else {
+                    dm.update_state_stopped().await;
+                }
+            }
+        }    
 }
 
 #[cfg(test)]

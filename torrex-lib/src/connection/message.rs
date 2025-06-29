@@ -91,10 +91,15 @@ impl Messages {
         let msg_len = u32::from_be_bytes(msg[0..4].try_into()?);
         let msg_id = msg[4];
 
+        // if msg_len == 0 {
+        //     self.message_type = MessageType::Unknown(0, vec![]);
+        //     // return Ok(None);
+        //     return Ok(());
+        // }
+
         if msg_len == 0 {
             self.message_type = MessageType::Unknown(0, vec![]);
-            // return Ok(None);
-            return Ok(());
+            return Ok(()); // This is a keep-alive message, not an error
         }
         let mut payload = vec![0u8; (msg_len - 1) as usize];
         stream.read_exact(&mut payload).await?;
@@ -179,6 +184,68 @@ impl Messages {
         }
 
         None
+    }
+
+    pub async fn send_keep_alive(
+        &mut self,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut stream = self.stream.lock().await;
+
+        stream.write(&[0, 0, 0, 0]).await?;
+        Ok(())
+    }
+
+    // Add not_interested message
+    pub async fn not_interested(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut stream = self.stream.lock().await;
+        stream.write_all(&[0, 0, 0, 1, 3]).await?;
+        Ok(())
+    }
+    pub fn start_keep_alive_sender(this: Arc<tokio::sync::Mutex<Self>>) {
+        let keep_alive_interval = Duration::from_secs(120);
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(keep_alive_interval);
+
+            loop {
+                interval.tick().await;
+
+                let mut messages = this.lock().await;
+
+                if let Err(e) = messages.send_keep_alive().await {
+                    eprintln!("Failed to send keep-alive: {}", e);
+                    break;
+                }
+            }
+        });
+    }
+
+    // Add have message
+    pub async fn send_have(
+        &mut self,
+        piece_index: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut stream = self.stream.lock().await;
+        let mut msg = vec![0, 0, 0, 5, 4]; // length + message_id
+        msg.extend(&piece_index.to_be_bytes());
+        stream.write_all(&msg).await?;
+        Ok(())
+    }
+
+    // Add cancel message
+    pub async fn send_cancel(
+        &mut self,
+        index: u32,
+        begin: u32,
+        length: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut stream = self.stream.lock().await;
+        let mut msg = vec![0, 0, 0, 13, 8]; // length + message_id
+        msg.extend(&index.to_be_bytes());
+        msg.extend(&begin.to_be_bytes());
+        msg.extend(&length.to_be_bytes());
+        stream.write_all(&msg).await?;
+        Ok(())
     }
 
     pub async fn wait_bitfield(&mut self) -> Option<HashSet<u32>> {
