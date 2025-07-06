@@ -19,10 +19,14 @@ use std::error;
 use std::ops::DerefMut;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::RwLockWriteGuard;
+use std::thread::sleep;
 use std::time::Duration;
 
+use crate::connection::download;
 use crate::connection::download::DownloadCommand;
 use crate::connection::download::DownloadManager;
+use crate::connection::download::DownloadState;
 use crate::connection::handshake::Handshake;
 use crate::connection::message::MessageType;
 use crate::connection::message::Messages;
@@ -1057,20 +1061,108 @@ impl SwarmManager {
             let completed_pieces = Arc::clone(&completed_pieces);
             //let unchoked_peers = Arc::clone(&unchoked_peers);
             let pieces = Arc::clone(&pieces);
-            // let download_manager = Arc::clone(&download_manager);
+            let download_manager = Arc::clone(&download_manager);
             let semaphore = semaphore.clone();
     
             let indexes = indexes.clone();
             let peer = peer.clone();
 
-            // let info_hash = self.info_hash.clone();
-            // let peer_pieces = self.peer_pieces.clone();
+            let info_hash = self.info_hash.clone();
+            let peer_pieces = self.peer_pieces.clone();
 
     
             tasks.push(tokio::spawn(async move {
                 let _permit = semaphore.acquire().await.expect("Could not acquire semaphore");
     
                 for index in indexes {
+                    println!("\n___________index {index}_________________\n");
+
+                    // let should_continue = 
+                    {
+                    let dl_state = { download_manager.lock().await.dl_state.read().await.clone() };
+                    match dl_state {
+                        DownloadState::Paused=>{
+                            // println!("Paused inside final peer msg");
+                            // while {
+                            //     let state = download_manager.lock().await.dl_state.read().await.clone();
+                            //     state == DownloadState::Paused
+                            // }{
+                            //     // tokio::time::sleep(Duration::from_millis(100)).await;
+                            //     println!("Waiting for Resume state");
+
+                            // }
+                            // true
+
+                            loop{
+                                let state = {
+                                    let dm = download_manager.lock().await;
+                                    dm.dl_state.read().await.clone()
+                                };
+
+                                if state != DownloadState::Paused{
+                                    break;
+                                }
+
+                                // tokio::time::sleep(Duration::from_millis(100)).await;
+                                println!("Waiting for Resume state")
+                            }
+
+                            true
+                        }
+                        // DownloadState::Resumed => {
+                        //     // load download state
+                        //     // start download
+                        //     // update state to downloading
+                        //     {
+                        //         let dm = download_manager.lock().await;
+                        //         let mut state = dm.dl_state.write().await;
+                        //         *state = DownloadState::Downloading;
+                        //     }
+                        // }
+
+                        DownloadState::Stopped => {
+                            println!("stopped inside final peere msg");
+                            // Save download state
+                            let dm = download_manager.lock().await;
+                            if let Err(e) = dm
+                                .save_download_state(
+                                    completed_pieces.read().await.clone(),
+                                    destination.to_string(),
+                                    info_hash,
+                                    peer_pieces,
+                                )
+                                .await
+                            {
+                                *dm.dl_state.write().await = DownloadState::Error;
+                                eprintln!("Error occured while saving downloads state. More: {e}");
+                            };
+
+                            return;
+                        }
+
+                        DownloadState::Completed => return,
+                        DownloadState::Error => {
+                            eprintln!("DownloadState has an error.");
+                            false
+                        }
+
+                        // This is for `DownloadState::Downloading` and `DownloadState::Initialized`
+                        // No need to interfere in those state.
+                        _ => true,
+                    }
+                };
+
+                // if !should_continue{
+                //     while {
+                //         let state = download_manager.lock().await.dl_state.read().await.clone();
+                //         state == DownloadState::Paused
+                //     }{
+                //         println!("Waiting for Resume state");
+                //         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                //     }
+                //     continue;
+                // }
+
                     // Add timeout for each piece download
                     match tokio::time::timeout(Duration::from_secs(300), async {
                         let mut connections = connections.lock().await;

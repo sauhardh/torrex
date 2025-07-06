@@ -100,12 +100,14 @@ impl DownloadManager {
 
     /// To pause the download
     pub async fn pause(&self) -> Result<(), Box<dyn std::error::Error>> {
+        println!("pause function called");
         let state = self.get_download_state().await;
         if state == DownloadState::Paused {
             return Ok(());
         }
 
         self.update_state_paused().await;
+        println!("pause updated");
 
         // TODO:
         // it may not be needed
@@ -119,6 +121,7 @@ impl DownloadManager {
 
     /// To resume the download
     pub async fn resume(&self) -> Result<(), Box<dyn std::error::Error>> {
+        println!("calling resume function");
         let state = self.get_download_state().await;
         if state == DownloadState::Downloading {
             return Ok(());
@@ -136,12 +139,14 @@ impl DownloadManager {
 
     /// To stop the download
     pub async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+        println!("stop called");
         let state = self.get_download_state().await;
         if state == DownloadState::Stopped {
             return Ok(());
         }
 
         self.update_state_stopped().await;
+        println!("Download state updated");
 
         // TODO:
         // it may not be needed

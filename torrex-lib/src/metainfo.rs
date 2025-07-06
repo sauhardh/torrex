@@ -142,7 +142,7 @@ mod metainfo_tester {
                 };
 
                 let info_hash = meta_info.info_hash(&output).unwrap();
-                println!("MetaInfo:{:#?}", meta_info);
+                println!("MetaInfo:{:?}", meta_info);
                 println!("info_hash: {:02x}", info_hash);
                 println!("Pieces Hash{:#?}", meta_info.info.pieces_hashes());
             }

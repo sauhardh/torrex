@@ -5,7 +5,6 @@ use actix_web::get;
 use actix_web::post;
 use actix_web::web;
 use actix_ws::CloseReason;
-use log::info;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -285,7 +284,7 @@ pub async fn start_download(
         match kind {
             //------To download using the magnet link------
             DownloadKind::Magnet((_, info)) => {
-                let mut manager = state.managers.lock().unwrap();
+                let mut manager = { state.managers.lock().unwrap() };
                 let sm = manager.get_mut(&uuid).unwrap();
 
                 // subscribe for updates
@@ -325,8 +324,13 @@ pub async fn start_download(
 
             //------To download using the torrent file------
             DownloadKind::Meta(meta) => {
-                let mut manager = state.managers.lock().unwrap();
-                let sm = manager.get_mut(&uuid).unwrap();
+                // let mut manager = { state.managers.lock().unwrap() };
+                // let sm = manager.get_mut(&uuid).unwrap();
+                let mut sm = {
+                    let mut manager = state.managers.lock().unwrap();
+                    manager.get_mut(&uuid).unwrap().clone()
+                };
+                // let sm = manager.get_mut(&uuid).unwrap();
 
                 // subscribe for updates
                 let sm = sm.subscribe_updates(tx).subscribe_downloadmanager().await;
@@ -437,6 +441,7 @@ async fn pause_download(
     state: web::Data<AppState>,
     query: web::Query<UuidQuery>,
 ) -> impl Responder {
+    println!("\n\n|||||||||||_____Pausing api called____\n||||||||||||||||||");
     let Ok(uuid) = Uuid::parse_str(&query.uuid) else {
         return HttpResponse::BadRequest().json(json!({
             "success":"false",
@@ -448,7 +453,7 @@ async fn pause_download(
     let s_guard = match state {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Failed to lock the state. {e:?}");
+            eprintln!("\n\nFailed to lock the state. {e:?}\n\n");
             return HttpResponse::BadRequest().json(json!({
                 "success":"false",
                 "message":"Failed to parse uuid to string"
@@ -456,8 +461,11 @@ async fn pause_download(
         }
     };
 
+    println!("\nstate locked");
+
     if let Some(s) = s_guard.get(&uuid) {
         let dm = s.download_manager.lock().await;
+        println!("pause calling");
         if let Err(e) = dm.pause().await {
             return HttpResponse::BadRequest().json(json!({
                 "success":"false",
@@ -493,8 +501,10 @@ async fn stop_download(state: web::Data<AppState>, query: web::Query<UuidQuery>)
         }
     };
 
+    println!("locked s_guard!");
     if let Some(s) = s_guard.get(&uuid) {
         let dm = s.download_manager.lock().await;
+        println!("clicking stop button");
         if let Err(e) = dm.stop().await {
             return HttpResponse::BadRequest().json(json!({
                 "success":"false",
@@ -514,6 +524,7 @@ async fn resume_download(
     state: web::Data<AppState>,
     query: web::Query<UuidQuery>,
 ) -> impl Responder {
+    println!("Resumed called nig");
     let Ok(uuid) = Uuid::parse_str(&query.uuid) else {
         return HttpResponse::BadRequest().json(json!({
             "success":"false",
@@ -521,6 +532,7 @@ async fn resume_download(
         }));
     };
 
+    println!("Locking state manager");
     let state = state.managers.lock();
     let s_guard = match state {
         Ok(s) => s,
@@ -532,6 +544,7 @@ async fn resume_download(
             }));
         }
     };
+    println!("locked state manager");
 
     if let Some(s) = s_guard.get(&uuid) {
         let dm = s.download_manager.lock().await;
