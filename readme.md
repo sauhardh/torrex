@@ -1,3 +1,0 @@
-# Torrex
-
-a bittorrent client.
