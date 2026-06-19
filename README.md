@@ -1,6 +1,6 @@
 # Torrex
 
-> A high-performance BitTorrent client library and HTTP API server built in Rust from.
+> A high-performance BitTorrent client library built in Rust from scratch.
 
 ## Features
 
@@ -55,8 +55,8 @@ GET http://127.0.0.1:7878/torrex/api/v1/initial_info_metafile?filepath="torrex-l
 
 Or use one of these CodeCrafters magnet links directly:
 
-| File | Magnet Link |
-|------|------------|
+| File          | Magnet Link                                                                                                                                      |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `magnet1.gif` | `magnet:?xt=urn:btih:ad42ce8109f54c99613ce38f9b4d87e70f24a165&dn=magnet1.gif&tr=http%3A%2F%2Fbittorrent-test-tracker.codecrafters.io%2Fannounce` |
 | `magnet2.gif` | `magnet:?xt=urn:btih:3f994a835e090238873498636b98a3e78d1c34ca&dn=magnet2.gif&tr=http%3A%2F%2Fbittorrent-test-tracker.codecrafters.io%2Fannounce` |
 | `magnet3.gif` | `magnet:?xt=urn:btih:c5fb9894bdaba464811b088d806bdd611ba490af&dn=magnet3.gif&tr=http%3A%2F%2Fbittorrent-test-tracker.codecrafters.io%2Fannounce` |
@@ -180,33 +180,7 @@ Stop a download entirely and close connections.
 
 The following diagram illustrates the high-level architecture and data flow between the client, Torrex API, and the Torrex library.
 
-```mermaid
-graph TD
-    %% Client Interactions
-    Client([Client / Web UI]) -->|1. Init Download (Magnet/Meta)| API[Torrex API Server]
-    Client -->|2. Start Download| API
-    Client -->|3. WebSocket Progress| API
-    Client -->|4. Pause/Resume/Stop| API
-
-    %% API Layer
-    subgraph Torrex Workspace
-        API
-        State[(App State Mutex)]
-        Lib[Torrex Library]
-
-        API <-->|Reads/Updates| State
-        API -->|Invokes parsing & networking| Lib
-        Lib -->|Sends progress via MPSC| API
-    end
-
-    %% External Network
-    Lib -->|Announce/Request| Tracker[HTTP Tracker]
-    Tracker -.->|Returns Peer IPs| Lib
-
-    Lib <-->|Peer Wire Protocol| Peer1[Peer]
-    Lib <-->|Peer Wire Protocol| Peer2[Peer]
-    Lib <-->|Extended Handshake| Peer3[Peer]
-```
+![system diagram](./sys.png)
 
 ## Todo
 
