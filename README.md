@@ -2,6 +2,8 @@
 
 > A high-performance BitTorrent client library built in Rust from scratch.
 
+**Demo: [Link:](https://github.com/sauhardh/torrex)**
+
 ## Features
 
 - **Torrent File Parsing:** Decode `.torrent` files using built-in Bencode parsing.
