@@ -2,7 +2,7 @@
 
 > A high-performance BitTorrent client library built in Rust from scratch.
 
-**Demo: [Link:](https://github.com/sauhardh/torrex)**
+**Demo: [Link:](https://youtu.be/sFCeABew5mo)**
 
 ## Features
 
